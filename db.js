@@ -43,6 +43,20 @@ function getAvailableSlots() {
   return db.prepare('SELECT * FROM slots WHERE is_booked = 0 ORDER BY slot_date, slot_time').all();
 }
 
+// Уникальные даты с хотя бы одним свободным слотом
+function getAvailableDates() {
+  return db.prepare(
+    'SELECT DISTINCT slot_date FROM slots WHERE is_booked = 0 ORDER BY slot_date'
+  ).all().map(r => r.slot_date);
+}
+
+// Свободные слоты на конкретную дату
+function getSlotsByDate(dateStr) {
+  return db.prepare(
+    'SELECT * FROM slots WHERE is_booked = 0 AND slot_date = ? ORDER BY slot_time'
+  ).all(dateStr);
+}
+
 function getSlotById(slotId) {
   return db.prepare('SELECT * FROM slots WHERE id = ?').get(slotId);
 }
@@ -133,7 +147,8 @@ function resetSlots() {
 }
 
 module.exports = {
-  upsertPatient, savePhone, getAvailableSlots, getSlotById,
+  upsertPatient, savePhone,
+  getAvailableSlots, getAvailableDates, getSlotsByDate, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
   getAppointmentsInTwoHours, markReminded, formatDate,
   getAllAppointments, seedSlotsIfEmpty, resetSlots
