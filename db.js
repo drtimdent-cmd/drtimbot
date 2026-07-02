@@ -70,13 +70,22 @@ function cancelAppointment(appointmentId) {
   db.prepare('UPDATE slots SET is_booked = 0 WHERE slot_date = ? AND slot_time = ?').run(appt.slot_date, appt.slot_time);
 }
 
-// Находим записи, до которых ровно ~2 часа (для напоминаний)
+// Находим записи ровно через 2 часа от текущего момента
 function getAppointmentsInTwoHours() {
+  const now = new Date();
+  // Целевое время = сейчас + 2 часа, округляем до часа
+  const target = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+  const targetDate = target.toISOString().slice(0, 10); // YYYY-MM-DD
+  const targetHour = String(target.getHours()).padStart(2, '0') + ':00';
+
   return db.prepare(`
     SELECT a.*, p.telegram_id, p.name, p.phone FROM appointments a
     JOIN patients p ON p.id = a.patient_id
-    WHERE a.status = 'booked' AND a.reminded = 0
-  `).all();
+    WHERE a.status = 'booked'
+      AND a.reminded = 0
+      AND a.slot_date = ?
+      AND a.slot_time = ?
+  `).all(targetDate, targetHour);
 }
 
 function markReminded(appointmentId) {
@@ -87,21 +96,33 @@ function getAllAppointments() {
   return db.prepare(`
     SELECT a.*, p.name, p.phone FROM appointments a
     JOIN patients p ON p.id = a.patient_id
-    ORDER BY a.created_at DESC
+    ORDER BY a.slot_date DESC, a.slot_time DESC
   `).all();
+}
+
+// Форматируем дату для показа пациенту: 2026-07-03 → 03.07 (пятница)
+function formatDate(dateStr) {
+  const days = ['воскресенье','понедельник','вторник','среда','четверг','пятница','суббота'];
+  const d = new Date(dateStr);
+  const day = String(d.getDate()).padStart(2, '0');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const weekday = days[d.getDay()];
+  return `${day}.${month} (${weekday})`;
 }
 
 function seedSlotsIfEmpty() {
   const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
   if (count > 0) return;
-  const times = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+
+  // Слоты на 14 дней вперёд, пн-сб, 9:00-17:00
+  const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
   const insert = db.prepare('INSERT INTO slots (slot_date, slot_time) VALUES (?, ?)');
   const today = new Date();
   for (let i = 0; i < 14; i++) {
     const d = new Date(today);
     d.setDate(today.getDate() + i);
-    if (d.getDay() === 0) continue;
-    const dateStr = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    if (d.getDay() === 0) continue; // воскресенье
+    const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD — правильный формат
     for (const t of times) insert.run(dateStr, t);
   }
 }
@@ -114,6 +135,6 @@ function resetSlots() {
 module.exports = {
   upsertPatient, savePhone, getAvailableSlots, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
-  getAppointmentsInTwoHours, markReminded,
+  getAppointmentsInTwoHours, markReminded, formatDate,
   getAllAppointments, seedSlotsIfEmpty, resetSlots
 };

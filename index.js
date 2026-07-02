@@ -85,7 +85,9 @@ bot.action(/service_(.+)/, async (ctx) => {
   const slots = db.getAvailableSlots().slice(0, 12);
   if (!slots.length) { await ctx.editMessageText(TEXTS[lang].noSlots); return; }
 
-  const buttons = slots.map(s => Markup.button.callback(`${s.slot_date} ${s.slot_time}`, `slot_${s.id}`));
+  const buttons = slots.map(s => Markup.button.callback(
+    `${db.formatDate(s.slot_date)} ${s.slot_time}`, `slot_${s.id}`
+  ));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 3) rows.push(buttons.slice(i, i + 3));
   await ctx.editMessageText(`${service.icon} ${service[lang]}\n\n${TEXTS[lang].chooseTime}`, Markup.inlineKeyboard(rows));
@@ -161,9 +163,13 @@ cron.schedule('0 * * * *', async () => {
   const upcoming = db.getAppointmentsInTwoHours();
   for (const appt of upcoming) {
     if (!appt.telegram_id) continue;
-    const lang = 'ru'; // напоминание на русском, можно хранить язык пациента в БД
+    const lang = 'ru';
     try {
-      await bot.telegram.sendMessage(appt.telegram_id, TEXTS[lang].reminder(appt.slot_date, appt.slot_time, appt.service));
+      await bot.telegram.sendMessage(
+        appt.telegram_id,
+        TEXTS[lang].reminder(db.formatDate(appt.slot_date), appt.slot_time, appt.service)
+      );
+      db.markReminded(appt.id);
     } catch (e) { /* пациент заблокировал бота */ }
   }
 });
