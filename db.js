@@ -1,4 +1,3 @@
-// db.js — простая база данных на SQLite, файл создаётся автоматически
 const Database = require('better-sqlite3');
 const db = new Database('clinic.db');
 
@@ -10,7 +9,6 @@ CREATE TABLE IF NOT EXISTS patients (
   phone TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-
 CREATE TABLE IF NOT EXISTS appointments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   patient_id INTEGER,
@@ -18,10 +16,10 @@ CREATE TABLE IF NOT EXISTS appointments (
   slot_date TEXT,
   slot_time TEXT,
   status TEXT DEFAULT 'booked',
+  reminded INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (patient_id) REFERENCES patients(id)
 );
-
 CREATE TABLE IF NOT EXISTS slots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   slot_date TEXT,
@@ -45,6 +43,10 @@ function getAvailableSlots() {
   return db.prepare('SELECT * FROM slots WHERE is_booked = 0 ORDER BY slot_date, slot_time').all();
 }
 
+function getSlotById(slotId) {
+  return db.prepare('SELECT * FROM slots WHERE id = ?').get(slotId);
+}
+
 function bookSlot(slotId, patientId, service) {
   const slot = db.prepare('SELECT * FROM slots WHERE id = ?').get(slotId);
   if (!slot || slot.is_booked) return null;
@@ -55,30 +57,30 @@ function bookSlot(slotId, patientId, service) {
   return { ...slot, appointmentId: info.lastInsertRowid };
 }
 
-function seedSlotsIfEmpty() {
-  const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
-  if (count > 0) return;
-
-  // Реальный график: пн-сб, 9:00-18:00, приём раз в час (последний слот 17:00)
-  // Генерируем слоты на 14 дней вперёд, воскресенье пропускаем
-  const times = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
-  const insert = db.prepare('INSERT INTO slots (slot_date, slot_time) VALUES (?, ?)');
-
-  const today = new Date();
-  for (let i = 0; i < 14; i++) {
-    const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    if (d.getDay() === 0) continue; // воскресенье — выходной
-
-    const dateStr = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
-    for (const t of times) insert.run(dateStr, t);
-  }
+function getNextAppointment(patientId) {
+  return db.prepare(
+    "SELECT * FROM appointments WHERE patient_id = ? AND status = 'booked' ORDER BY created_at DESC LIMIT 1"
+  ).get(patientId);
 }
 
-// сбросить и заново сгенерировать расписание (на случай если нужно обновить даты)
-function resetSlots() {
-  db.prepare('DELETE FROM slots WHERE is_booked = 0').run();
-  seedSlotsIfEmpty();
+function cancelAppointment(appointmentId) {
+  const appt = db.prepare('SELECT * FROM appointments WHERE id = ?').get(appointmentId);
+  if (!appt) return;
+  db.prepare("UPDATE appointments SET status = 'cancelled' WHERE id = ?").run(appointmentId);
+  db.prepare('UPDATE slots SET is_booked = 0 WHERE slot_date = ? AND slot_time = ?').run(appt.slot_date, appt.slot_time);
+}
+
+// Находим записи, до которых ровно ~2 часа (для напоминаний)
+function getAppointmentsInTwoHours() {
+  return db.prepare(`
+    SELECT a.*, p.telegram_id, p.name, p.phone FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.status = 'booked' AND a.reminded = 0
+  `).all();
+}
+
+function markReminded(appointmentId) {
+  db.prepare('UPDATE appointments SET reminded = 1 WHERE id = ?').run(appointmentId);
 }
 
 function getAllAppointments() {
@@ -89,6 +91,29 @@ function getAllAppointments() {
   `).all();
 }
 
+function seedSlotsIfEmpty() {
+  const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
+  if (count > 0) return;
+  const times = ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00'];
+  const insert = db.prepare('INSERT INTO slots (slot_date, slot_time) VALUES (?, ?)');
+  const today = new Date();
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(today);
+    d.setDate(today.getDate() + i);
+    if (d.getDay() === 0) continue;
+    const dateStr = d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+    for (const t of times) insert.run(dateStr, t);
+  }
+}
+
+function resetSlots() {
+  db.prepare('DELETE FROM slots WHERE is_booked = 0').run();
+  seedSlotsIfEmpty();
+}
+
 module.exports = {
-  upsertPatient, savePhone, getAvailableSlots, bookSlot, seedSlotsIfEmpty, resetSlots, getAllAppointments
+  upsertPatient, savePhone, getAvailableSlots, getSlotById,
+  bookSlot, getNextAppointment, cancelAppointment,
+  getAppointmentsInTwoHours, markReminded,
+  getAllAppointments, seedSlotsIfEmpty, resetSlots
 };
