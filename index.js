@@ -13,11 +13,12 @@ const bot = new Telegraf(BOT_TOKEN);
 db.seedSlotsIfEmpty();
 
 const SERVICES = [
+  { id: 'consult',    icon: '🩺', ru: 'Консультация врача',                            uz: 'Shifokor maslahati' },
   { id: 'filling',    icon: '🦷', ru: 'Реставрация (пломба) зуба',                    uz: 'Tish plombasi (restavratsiya)' },
   { id: 'clean',      icon: '✨', ru: 'Профессиональная чистка зубов',                 uz: 'Tishlarni professional tozalash' },
   { id: 'prosthetics',icon: '👑', ru: 'Съёмное и несъёмное протезирование',            uz: 'Olinadigan va olinmaydigan protezlash' },
   { id: 'extraction', icon: '🛠️', ru: 'Удаление зубов',                               uz: 'Tishni olib tashlash' },
-  { id: 'endo',       icon: '🩺', ru: 'Эндодонтическое лечение (удаление нерва)',      uz: 'Endodontik davolash (nerv olish)' },
+  { id: 'endo',       icon: '🔬', ru: 'Эндодонтическое лечение (удаление нерва)',      uz: 'Endodontik davolash (nerv olish)' },
 ];
 
 const TEXTS = {
@@ -99,7 +100,8 @@ bot.action(/slot_(\d+)/, async (ctx) => {
   if (!slot || slot.is_booked) { await ctx.editMessageText(TEXTS[lang].slotTaken); return; }
 
   userState[ctx.from.id] = { ...state, slotId: slot.id };
-  await ctx.editMessageText(TEXTS[lang].askPhone,
+  await ctx.answerCbQuery();
+  await ctx.reply(TEXTS[lang].askPhone,
     Markup.keyboard([[Markup.button.contactRequest(TEXTS[lang].phoneBtn)]]).resize().oneTime()
   );
 });
