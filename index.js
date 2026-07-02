@@ -148,6 +148,14 @@ bot.command('cancel', async (ctx) => {
 });
 
 // ─── /appointments (только для врача) ────────────────────
+bot.command('resetdb', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) {
+    ctx.reply('Команда доступна только администратору.');
+    return;
+  }
+  db.resetSlots();
+  ctx.reply('✅ База слотов сброшена! Новые даты загружены.');
+});
 bot.command('appointments', (ctx) => {
   if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
   const list = db.getAllAppointments();
