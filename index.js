@@ -17,7 +17,7 @@ const SERVICES = [
   { id: 'filling',     icon: '🦷', ru: 'Реставрация (пломба) зуба',                  uz: 'Tish plombasi (restavratsiya)' },
   { id: 'clean',       icon: '✨', ru: 'Профессиональная чистка зубов',               uz: 'Tishlarni professional tozalash' },
   { id: 'prosthetics', icon: '👑', ru: 'Съёмное и несъёмное протезирование',          uz: 'Olinadigan va olinmaydigan protezlash' },
-  { id: 'extraction',  icon: '🛠️', ru: 'Удаление зубов',                             uz: 'Tishni olib tashlash' },
+  { id: 'extraction',  icon: '❌', ru: 'Удаление зубов',                              uz: 'Tishni olib tashlash' },
   { id: 'endo',        icon: '🔬', ru: 'Эндодонтическое лечение (удаление нерва)',    uz: 'Endodontik davolash (nerv olish)' },
 ];
 
@@ -82,7 +82,7 @@ bot.action(/service_(.+)/, async (ctx) => {
   if (!state?.lang) { await ctx.answerCbQuery(); return; }
   const lang = state.lang;
   const service = SERVICES.find(s => s.id === ctx.match[1]);
-  userState[ctx.from.id] = { lang, service: service[lang], serviceIcon: service.icon };
+  userState[ctx.from.id] = { lang, service: service[lang], serviceIcon: service.icon, serviceId: service.id };
 
   const dates = db.getAvailableDates();
   if (!dates.length) { await ctx.editMessageText(TEXTS[lang].noSlots); return; }
@@ -90,7 +90,35 @@ bot.action(/service_(.+)/, async (ctx) => {
   const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
 
+  await ctx.editMessageText(
+    `${service.icon} ${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
+    Markup.inlineKeyboard(rows)
+  );
+});
+
+// ─── Назад к списку услуг ─────────────────────────────────
+bot.action('back_to_services', async (ctx) => {
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  const name = ctx.from.first_name || (lang === 'ru' ? 'Гость' : 'Mehmon');
+  await ctx.editMessageText(TEXTS[lang].welcome(name),
+    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
+  );
+});
+
+// ─── Назад к списку дат ───────────────────────────────────
+bot.action(/back_to_dates_(.+)/, async (ctx) => {
+  const serviceId = ctx.match[1];
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  const service = SERVICES.find(s => s.id === serviceId);
+  const dates = db.getAvailableDates();
+  const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
   await ctx.editMessageText(
     `${service.icon} ${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
@@ -121,6 +149,7 @@ bot.action(/date_(.+)/, async (ctx) => {
   const buttons = slots.map(s => Markup.button.callback(s.slot_time, `slot_${s.id}`));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 3) rows.push(buttons.slice(i, i + 3));
+  rows.push([Markup.button.callback('⬅️ Назад / Orqaga', `back_to_dates_${state.serviceId}`)]);
 
   await ctx.editMessageText(TEXTS[lang].chooseTime(formattedDate), Markup.inlineKeyboard(rows));
 });
