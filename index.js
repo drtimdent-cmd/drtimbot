@@ -17,7 +17,7 @@ const SERVICES = [
   { id: 'filling',     icon: '🦷', ru: 'Реставрация (пломба) зуба',                  uz: 'Tish plombasi (restavratsiya)' },
   { id: 'clean',       icon: '✨', ru: 'Профессиональная чистка зубов',               uz: 'Tishlarni professional tozalash' },
   { id: 'prosthetics', icon: '👑', ru: 'Съёмное и несъёмное протезирование',          uz: 'Olinadigan va olinmaydigan protezlash' },
-  { id: 'extraction',  icon: '❌', ru: 'Удаление зубов',                              uz: 'Tishni olib tashlash' },
+  { id: 'extraction',  icon: '🛠', ru: 'Удаление зубов',                              uz: 'Tishni olib tashlash' },
   { id: 'endo',        icon: '🔬', ru: 'Эндодонтическое лечение (удаление нерва)',    uz: 'Endodontik davolash (nerv olish)' },
 ];
 
@@ -72,7 +72,7 @@ bot.action(/lang_(.+)/, async (ctx) => {
   db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
   userState[ctx.from.id] = { lang };
   await ctx.editMessageText(TEXTS[lang].welcome(name),
-    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(s[lang], `service_${s.id}`)]))
+    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
   );
 });
 
@@ -93,7 +93,9 @@ bot.action(/service_(.+)/, async (ctx) => {
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
 
   await ctx.editMessageText(
-    `${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
+    `${service.icon} ${service[lang]}
+
+${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
@@ -104,7 +106,7 @@ bot.action('back_to_services', async (ctx) => {
   const lang = state?.lang || 'ru';
   const name = ctx.from.first_name || (lang === 'ru' ? 'Гость' : 'Mehmon');
   await ctx.editMessageText(TEXTS[lang].welcome(name),
-    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(s[lang], `service_${s.id}`)]))
+    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
   );
 });
 
@@ -120,7 +122,9 @@ bot.action(/back_to_dates_(.+)/, async (ctx) => {
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
   await ctx.editMessageText(
-    `${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
+    `${service.icon} ${service[lang]}
+
+${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
@@ -228,6 +232,12 @@ bot.command('appointments', (ctx) => {
     `${db.formatDate(a.slot_date)} ${a.slot_time} — ${a.name} (${a.phone || '—'})\n${a.service} [${a.status}]`
   ).join('\n\n');
   ctx.reply(text);
+});
+
+// ─── Каждое воскресенье в полночь — пополняем расписание ──
+cron.schedule('0 0 * * 0', () => {
+  db.refillSlots();
+  console.log('Расписание пополнено на следующие 14 дней');
 });
 
 // ─── Напоминания — каждый час ─────────────────────────────

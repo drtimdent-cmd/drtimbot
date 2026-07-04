@@ -141,6 +141,27 @@ function seedSlotsIfEmpty() {
   }
 }
 
+// Добавляет слоты на следующие 14 дней если их осталось меньше 7
+function refillSlots() {
+  const last = db.prepare(
+    'SELECT slot_date FROM slots ORDER BY slot_date DESC LIMIT 1'
+  ).get();
+
+  const startDate = last ? new Date(last.slot_date) : new Date();
+  startDate.setDate(startDate.getDate() + 1);
+
+  const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
+  const insert = db.prepare('INSERT OR IGNORE INTO slots (slot_date, slot_time) VALUES (?, ?)');
+
+  for (let i = 0; i < 14; i++) {
+    const d = new Date(startDate);
+    d.setDate(startDate.getDate() + i);
+    if (d.getDay() === 0) continue;
+    const dateStr = d.toISOString().slice(0, 10);
+    for (const t of times) insert.run(dateStr, t);
+  }
+}
+
 function resetSlots() {
   db.prepare('DELETE FROM slots WHERE is_booked = 0').run();
   seedSlotsIfEmpty();
@@ -151,5 +172,5 @@ module.exports = {
   getAvailableSlots, getAvailableDates, getSlotsByDate, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
   getAppointmentsInTwoHours, markReminded, formatDate,
-  getAllAppointments, seedSlotsIfEmpty, resetSlots
+  getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots
 };
