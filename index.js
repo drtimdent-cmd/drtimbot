@@ -72,7 +72,7 @@ bot.action(/lang_(.+)/, async (ctx) => {
   db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
   userState[ctx.from.id] = { lang };
   await ctx.editMessageText(TEXTS[lang].welcome(name),
-    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
+    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(s[lang], `service_${s.id}`)]))
   );
 });
 
@@ -93,7 +93,7 @@ bot.action(/service_(.+)/, async (ctx) => {
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
 
   await ctx.editMessageText(
-    `${service.icon} ${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
+    `${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
@@ -104,7 +104,7 @@ bot.action('back_to_services', async (ctx) => {
   const lang = state?.lang || 'ru';
   const name = ctx.from.first_name || (lang === 'ru' ? 'Гость' : 'Mehmon');
   await ctx.editMessageText(TEXTS[lang].welcome(name),
-    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
+    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(s[lang], `service_${s.id}`)]))
   );
 });
 
@@ -120,7 +120,7 @@ bot.action(/back_to_dates_(.+)/, async (ctx) => {
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
   await ctx.editMessageText(
-    `${service.icon} ${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
+    `${service[lang]}\n\n${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
