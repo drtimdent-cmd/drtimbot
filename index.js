@@ -156,7 +156,11 @@ bot.action('ai_skip', async (ctx) => {
 
 async function askClaude(symptoms, lang) {
   const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) return null;
+  if (!GEMINI_KEY) {
+    console.log('GEMINI_API_KEY не задан');
+    return null;
+  }
+  console.log('Запрос к Gemini, длина симптомов:', symptoms.length);
 
   const systemPrompt = lang === 'ru'
     ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке.
@@ -188,8 +192,11 @@ Qoidalar:
       }
     );
     const data = await res.json();
+    console.log('Gemini статус:', res.status);
+    console.log('Gemini ответ:', JSON.stringify(data).slice(0, 200));
     return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
   } catch(e) {
+    console.log('Gemini ошибка:', e.message);
     return null;
   }
 }
