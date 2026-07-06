@@ -32,6 +32,11 @@ const TEXTS = {
     noSlots:      'Сейчас нет свободных дней. Попробуйте позже или позвоните в клинику.',
     booked:       (date, time, service) => `✅ Вы записаны!\n\n📅 ${date}, ${time}\n💊 ${service}\n🏥 ${CLINIC_NAME}\n\nМы напомним вам за 2 часа до визита.`,
     reminder:     (date, time, service) => `⏰ Напоминание!\n\nСкоро у вас визит в ${CLINIC_NAME}:\n📅 ${date}, ${time}\n💊 ${service}\n\nЕсли не сможете прийти — отмените через /cancel`,
+    reviewAsk:    (name) => `Здравствуйте, ${name}! 😊\n\nКак прошёл ваш визит в ${CLINIC_NAME}?\n\nПоставьте оценку:`,
+    reviewThanks: (rating) => `Спасибо за оценку ${rating}⭐! Ваше мнение очень важно для нас. Ждём вас снова! 🦷`,
+    reviewComment:'Хотите оставить комментарий? Напишите его или нажмите "Пропустить":',
+    reviewSkip:   'Пропустить',
+    rebooking:    (name) => `Здравствуйте, ${name}! 👋\n\nПрошло 6 месяцев с вашего последнего визита в ${CLINIC_NAME}.\n\nРекомендуем пройти профилактический осмотр — это займёт всего 30 минут и поможет сохранить здоровье зубов! 🦷\n\nЗаписаться: /start`,
     cancelNone:   'У вас нет предстоящих записей.',
     cancelDone:   (date, time) => `❌ Запись на ${date} в ${time} отменена. Если хотите записаться снова — /start`,
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
@@ -46,6 +51,11 @@ const TEXTS = {
     noSlots:      "Hozircha bo'sh kunlar yo'q. Iltimos keyinroq urinib ko'ring yoki klinikaga qo'ng'iroq qiling.",
     booked:       (date, time, service) => `✅ Siz yozildingiz!\n\n📅 ${date}, ${time}\n💊 ${service}\n🏥 ${CLINIC_NAME}\n\nUchrashuvdan 2 soat oldin eslatma yuboriladi.`,
     reminder:     (date, time, service) => `⏰ Eslatma!\n\n${CLINIC_NAME} klinikasiga yozilgansiz:\n📅 ${date}, ${time}\n💊 ${service}\n\nKela olmasangiz — /cancel orqali bekor qiling`,
+    reviewAsk:    (name) => `Salom, ${name}! 😊\n\n${CLINIC_NAME} klinikasiga tashrif qanday o'tdi?\n\nBaho bering:`,
+    reviewThanks: (rating) => `${rating}⭐ baho uchun rahmat! Fikringiz biz uchun juda muhim. Yana kutib qolamiz! 🦷`,
+    reviewComment:"Izoh qoldirmoqchimisiz? Yozing yoki 'O'tkazib yuborish' tugmasini bosing:",
+    reviewSkip:   "O'tkazib yuborish",
+    rebooking:    (name) => `Salom, ${name}! 👋\n\n${CLINIC_NAME} klinikasiga oxirgi tashrifingizdan 6 oy o'tdi.\n\nProfilaktik ko'rik o'tkazishni tavsiya qilamiz — bu atigi 30 daqiqa vaqt oladi! 🦷\n\nYozilish: /start`,
     cancelNone:   "Sizda kelgusi yozuvlar yo'q.",
     cancelDone:   (date, time) => `❌ ${date} kuni ${time} dagi yozuv bekor qilindi. Qayta yozilish uchun — /start`,
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
@@ -232,6 +242,86 @@ bot.command('appointments', (ctx) => {
     `${db.formatDate(a.slot_date)} ${a.slot_time} — ${a.name} (${a.phone || '—'})\n${a.service} [${a.status}]`
   ).join('\n\n');
   ctx.reply(text);
+});
+
+// ─── Оценка после визита ──────────────────────────────────
+bot.action(/review_(\d+)_(\d+)/, async (ctx) => {
+  const rating = parseInt(ctx.match[1]);
+  const appointmentId = parseInt(ctx.match[2]);
+  const lang = userState[ctx.from.id]?.lang || 'ru';
+  const t = TEXTS[lang];
+  const patient = db.upsertPatient(ctx.from.id, ctx.from.first_name || '');
+
+  db.saveReview(patient.id, appointmentId, rating, '');
+  userState[ctx.from.id] = { ...userState[ctx.from.id], reviewApptId: appointmentId };
+
+  await ctx.editMessageText(t.reviewComment,
+    Markup.inlineKeyboard([[Markup.button.callback(t.reviewSkip, `review_skip_${appointmentId}`)]])
+  );
+
+  if (ADMIN_CHAT_ID) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID,
+      `⭐ Новый отзыв!\n\nПациент: ${ctx.from.first_name || ''}\nОценка: ${rating}/5`
+    ).catch(() => {});
+  }
+});
+
+bot.action(/review_skip_(\d+)/, async (ctx) => {
+  const lang = userState[ctx.from.id]?.lang || 'ru';
+  const rating = userState[ctx.from.id]?.lastRating || 5;
+  await ctx.editMessageText(TEXTS[lang].reviewThanks(rating));
+  delete userState[ctx.from.id];
+});
+
+// Текстовый комментарий к отзыву
+bot.on('text', async (ctx) => {
+  const state = userState[ctx.from.id];
+  if (!state?.reviewApptId) return;
+  const lang = state.lang || 'ru';
+  const patient = db.upsertPatient(ctx.from.id, ctx.from.first_name || '');
+  const review = db.getReviewByAppointment(state.reviewApptId);
+  if (review) {
+    db.saveReview(patient.id, state.reviewApptId, review.rating, ctx.message.text);
+  }
+  await ctx.reply(TEXTS[lang].reviewThanks(review?.rating || 5));
+  if (ADMIN_CHAT_ID && ctx.message.text) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID,
+      `💬 Комментарий к отзыву от ${ctx.from.first_name || ''}:\n"${ctx.message.text}"`
+    ).catch(() => {});
+  }
+  delete userState[ctx.from.id];
+});
+
+// ─── Каждый день в 10:00 — запрос отзыва после вчерашних визитов ──
+cron.schedule('0 10 * * *', async () => {
+  const visits = db.getVisitsForReview();
+  for (const v of visits) {
+    if (!v.telegram_id) continue;
+    try {
+      await bot.telegram.sendMessage(v.telegram_id,
+        TEXTS['ru'].reviewAsk(v.name || ''),
+        Markup.inlineKeyboard([[
+          Markup.button.callback('⭐ 1', `review_1_${v.id}`),
+          Markup.button.callback('⭐ 2', `review_2_${v.id}`),
+          Markup.button.callback('⭐ 3', `review_3_${v.id}`),
+          Markup.button.callback('⭐ 4', `review_4_${v.id}`),
+          Markup.button.callback('⭐ 5', `review_5_${v.id}`),
+        ]])
+      );
+      db.markReviewSent(v.id);
+    } catch(e) { /* пациент заблокировал бота */ }
+  }
+});
+
+// ─── Каждый день в 11:00 — напоминание о повторном визите через 6 месяцев ──
+cron.schedule('0 11 * * *', async () => {
+  const patients = db.getPatientsForRebooking();
+  for (const p of patients) {
+    if (!p.telegram_id) continue;
+    try {
+      await bot.telegram.sendMessage(p.telegram_id, TEXTS['ru'].rebooking(p.name || ''));
+    } catch(e) { /* пациент заблокировал бота */ }
+  }
 });
 
 // ─── Каждый день в полночь — удаляем прошедшие слоты ─────

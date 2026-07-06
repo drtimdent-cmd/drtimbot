@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS appointments (
   slot_time TEXT,
   status TEXT DEFAULT 'booked',
   reminded INTEGER DEFAULT 0,
+  review_sent INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (patient_id) REFERENCES patients(id)
 );
@@ -25,6 +26,14 @@ CREATE TABLE IF NOT EXISTS slots (
   slot_date TEXT,
   slot_time TEXT,
   is_booked INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS reviews (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  patient_id INTEGER,
+  appointment_id INTEGER,
+  rating INTEGER,
+  comment TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `);
 
@@ -167,10 +176,51 @@ function resetSlots() {
   seedSlotsIfEmpty();
 }
 
+// Визиты вчерашнего дня которым ещё не отправлен запрос отзыва
+function getVisitsForReview() {
+  const yesterday = new Date(Date.now() - 24*60*60*1000).toISOString().slice(0,10);
+  return db.prepare(`
+    SELECT a.*, p.telegram_id, p.name FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.slot_date = ? AND a.status = 'booked' AND a.review_sent = 0
+      AND p.telegram_id IS NOT NULL
+  `).all(yesterday);
+}
+
+function markReviewSent(appointmentId) {
+  db.prepare('UPDATE appointments SET review_sent = 1 WHERE id = ?').run(appointmentId);
+}
+
+function saveReview(patientId, appointmentId, rating, comment) {
+  db.prepare(
+    'INSERT INTO reviews (patient_id, appointment_id, rating, comment) VALUES (?,?,?,?)'
+  ).run(patientId, appointmentId, rating, comment || '');
+}
+
+function getReviewByAppointment(appointmentId) {
+  return db.prepare('SELECT * FROM reviews WHERE appointment_id = ?').get(appointmentId);
+}
+
+// Пациенты у которых последний визит был ровно 6 месяцев назад
+function getPatientsForRebooking() {
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const target = sixMonthsAgo.toISOString().slice(0,10);
+  return db.prepare(`
+    SELECT p.*, MAX(a.slot_date) as last_visit FROM patients p
+    JOIN appointments a ON a.patient_id = p.id
+    WHERE a.status = 'booked' AND p.telegram_id IS NOT NULL
+    GROUP BY p.id
+    HAVING last_visit = ?
+  `).all(target);
+}
+
 module.exports = {
   upsertPatient, savePhone,
   getAvailableSlots, getAvailableDates, getSlotsByDate, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
   getAppointmentsInTwoHours, markReminded, formatDate,
+  getVisitsForReview, markReviewSent, saveReview, getReviewByAppointment,
+  getPatientsForRebooking,
   getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots
 };
