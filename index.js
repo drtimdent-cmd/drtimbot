@@ -234,6 +234,14 @@ bot.command('appointments', (ctx) => {
   ctx.reply(text);
 });
 
+// ─── Каждый день в полночь — удаляем прошедшие слоты ─────
+cron.schedule('0 0 * * *', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  db.prepare('DELETE FROM slots WHERE slot_date < ? AND is_booked = 0').run(today);
+  db.refillSlots();
+  console.log('Старые слоты удалены, расписание обновлено');
+});
+
 // ─── Каждое воскресенье в полночь — пополняем расписание ──
 cron.schedule('0 0 * * 0', () => {
   db.refillSlots();
