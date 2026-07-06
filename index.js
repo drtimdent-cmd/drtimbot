@@ -155,48 +155,40 @@ bot.action('ai_skip', async (ctx) => {
 });
 
 async function askClaude(symptoms, lang) {
-  const GEMINI_KEY = process.env.GEMINI_API_KEY;
-  if (!GEMINI_KEY) {
-    console.log('GEMINI_API_KEY не задан');
+  const GROQ_KEY = process.env.GROQ_API_KEY;
+  if (!GROQ_KEY) {
+    console.log('GROQ_API_KEY не задан');
     return null;
   }
-  console.log('Запрос к Gemini, длина симптомов:', symptoms.length);
+  console.log('Запрос к Groq, длина симптомов:', symptoms.length);
 
   const systemPrompt = lang === 'ru'
-    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке.
-Правила:
-- Никогда не ставь диагноз
-- Всегда рекомендуй обратиться к врачу
-- Будь дружелюбным и понятным
-- Если симптомы серьёзные (сильная боль, отёк, температура) — рекомендуй срочный визит
-- Заканчивай ответ фразой о важности осмотра у специалиста`
-    : `Siz "${CLINIC_NAME}" stomatologiya klinikasining yordamchisisiz. Bemor belgilarini tasvirlab beradi, siz o'zbek tilida qisqa (3-5 gap) dastlabki tavsiya berasiz.
-Qoidalar:
-- Hech qachon tashxis qo'ymang
-- Har doim shifokorga murojaat qilishni tavsiya qiling
-- Do'stona va tushunarli bo'ling
-- Og'ir belgilar bo'lsa (kuchli og'riq, shish, harorat) — shoshilinch tashrif tavsiya qiling`;
+    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке. Никогда не ставь диагноз. Всегда рекомендуй обратиться к врачу. Если симптомы серьёзные (сильная боль, отёк, температура) — рекомендуй срочный визит.`
+    : `Siz "${CLINIC_NAME}" stomatologiya klinikasining yordamchisisiz. Bemor belgilarini tasvirlab beradi, siz o'zbek tilida qisqa (3-5 gap) dastlabki tavsiya berasiz. Hech qachon tashxis qo'ymang. Har doim shifokorga murojaat qilishni tavsiya qiling.`;
 
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{ text: systemPrompt + '\n\nПациент пишет: ' + symptoms }]
-          }],
-          generationConfig: { maxOutputTokens: 500, temperature: 0.7 }
-        }),
-      }
-    );
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: symptoms },
+        ],
+        max_tokens: 500,
+        temperature: 0.7,
+      }),
+    });
     const data = await res.json();
-    console.log('Gemini статус:', res.status);
-    console.log('Gemini ответ:', JSON.stringify(data).slice(0, 200));
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
+    console.log('Groq статус:', res.status);
+    console.log('Groq ответ:', JSON.stringify(data).slice(0, 200));
+    return data.choices?.[0]?.message?.content || null;
   } catch(e) {
-    console.log('Gemini ошибка:', e.message);
+    console.log('Groq ошибка:', e.message);
     return null;
   }
 }
