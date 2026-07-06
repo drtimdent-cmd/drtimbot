@@ -155,11 +155,11 @@ bot.action('ai_skip', async (ctx) => {
 });
 
 async function askClaude(symptoms, lang) {
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  if (!ANTHROPIC_KEY) return null;
+  const GEMINI_KEY = process.env.GEMINI_API_KEY;
+  if (!GEMINI_KEY) return null;
 
   const systemPrompt = lang === 'ru'
-    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке. 
+    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке.
 Правила:
 - Никогда не ставь диагноз
 - Всегда рекомендуй обратиться к врачу
@@ -174,22 +174,21 @@ Qoidalar:
 - Og'ir belgilar bo'lsa (kuchli og'riq, shish, harorat) — shoshilinch tashrif tavsiya qiling`;
 
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 500,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: symptoms }],
-      }),
-    });
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{ text: systemPrompt + '\n\nПациент пишет: ' + symptoms }]
+          }],
+          generationConfig: { maxOutputTokens: 500, temperature: 0.7 }
+        }),
+      }
+    );
     const data = await res.json();
-    return data.content?.[0]?.text || null;
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
   } catch(e) {
     return null;
   }
