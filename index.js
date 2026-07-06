@@ -37,7 +37,13 @@ const TEXTS = {
     reviewComment:'Хотите оставить комментарий? Напишите его или нажмите "Пропустить":',
     reviewSkip:   'Пропустить',
     rebooking:    (name) => `Здравствуйте, ${name}! 👋\n\nПрошло 6 месяцев с вашего последнего визита в ${CLINIC_NAME}.\n\nРекомендуем пройти профилактический осмотр — это займёт всего 30 минут и поможет сохранить здоровье зубов! 🦷\n\nЗаписаться: /start`,
-    cancelNone:   'У вас нет предстоящих записей.',
+    aiConsultBtn: '🤖 ИИ-консультация',
+    aiAsk:        'Опишите свою проблему или симптомы как можно подробнее, и я дам предварительную рекомендацию:\n\n_(Например: болит зуб справа, боль при жевании, началась 3 дня назад)_',
+    aiThinking:   '🤔 Анализирую симптомы...',
+    aiError:      'Не удалось получить ответ. Пожалуйста, позвоните в клинику напрямую.',
+    aiBooking:    '\n\n📅 Хотите записаться на приём?',
+    aiBookBtn:    '✅ Записаться',
+    aiSkipBtn:    'Не сейчас',
     cancelDone:   (date, time) => `❌ Запись на ${date} в ${time} отменена. Если хотите записаться снова — /start`,
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
   },
@@ -56,7 +62,13 @@ const TEXTS = {
     reviewComment:"Izoh qoldirmoqchimisiz? Yozing yoki 'O'tkazib yuborish' tugmasini bosing:",
     reviewSkip:   "O'tkazib yuborish",
     rebooking:    (name) => `Salom, ${name}! 👋\n\n${CLINIC_NAME} klinikasiga oxirgi tashrifingizdan 6 oy o'tdi.\n\nProfilaktik ko'rik o'tkazishni tavsiya qilamiz — bu atigi 30 daqiqa vaqt oladi! 🦷\n\nYozilish: /start`,
-    cancelNone:   "Sizda kelgusi yozuvlar yo'q.",
+    aiConsultBtn: '🤖 Sun\'iy intellekt maslahati',
+    aiAsk:        'Muammo yoki belgilaringizni imkon qadar batafsil tasvirlab bering:\n\n_(Masalan: o\'ng tomonda tish og\'riyapti, chaynashda og\'riq, 3 kun oldin boshlandi)_',
+    aiThinking:   '🤔 Belgilar tahlil qilinmoqda...',
+    aiError:      'Javob olishning iloji bo\'lmadi. Iltimos, klinikaga to\'g\'ridan-to\'g\'ri qo\'ng\'iroq qiling.',
+    aiBooking:    '\n\n📅 Qabul uchun yozilmoqchimisiz?',
+    aiBookBtn:    '✅ Yozilish',
+    aiSkipBtn:    'Hozir emas',
     cancelDone:   (date, time) => `❌ ${date} kuni ${time} dagi yozuv bekor qilindi. Qayta yozilish uchun — /start`,
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
   },
@@ -81,8 +93,12 @@ bot.action(/lang_(.+)/, async (ctx) => {
   const name = ctx.from.first_name || (lang === 'ru' ? 'Гость' : 'Mehmon');
   db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
   userState[ctx.from.id] = { lang };
-  await ctx.editMessageText(TEXTS[lang].welcome(name),
-    Markup.inlineKeyboard(SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]))
+  const t = TEXTS[lang];
+  await ctx.editMessageText(t.welcome(name),
+    Markup.inlineKeyboard([
+      ...SERVICES.map(s => [Markup.button.callback(`${s.icon} ${s[lang]}`, `service_${s.id}`)]),
+      [Markup.button.callback(t.aiConsultBtn, 'ai_consult')],
+    ])
   );
 });
 
@@ -109,6 +125,75 @@ ${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
+
+// ─── ИИ-консультация ──────────────────────────────────────
+bot.action('ai_consult', async (ctx) => {
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  userState[ctx.from.id] = { ...state, waitingForSymptoms: true };
+  await ctx.editMessageText(TEXTS[lang].aiAsk, { parse_mode: 'Markdown' });
+});
+
+bot.action('ai_book', async (ctx) => {
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  userState[ctx.from.id] = { lang };
+  const dates = db.getAvailableDates();
+  if (!dates.length) { await ctx.editMessageText(TEXTS[lang].noSlots); return; }
+  const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
+  const rows = [];
+  for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+  rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
+  await ctx.editMessageText(TEXTS[lang].chooseDate, Markup.inlineKeyboard(rows));
+});
+
+bot.action('ai_skip', async (ctx) => {
+  const lang = userState[ctx.from.id]?.lang || 'ru';
+  userState[ctx.from.id] = { lang };
+  await ctx.answerCbQuery();
+  await ctx.deleteMessage();
+});
+
+async function askClaude(symptoms, lang) {
+  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+  if (!ANTHROPIC_KEY) return null;
+
+  const systemPrompt = lang === 'ru'
+    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке. 
+Правила:
+- Никогда не ставь диагноз
+- Всегда рекомендуй обратиться к врачу
+- Будь дружелюбным и понятным
+- Если симптомы серьёзные (сильная боль, отёк, температура) — рекомендуй срочный визит
+- Заканчивай ответ фразой о важности осмотра у специалиста`
+    : `Siz "${CLINIC_NAME}" stomatologiya klinikasining yordamchisisiz. Bemor belgilarini tasvirlab beradi, siz o'zbek tilida qisqa (3-5 gap) dastlabki tavsiya berasiz.
+Qoidalar:
+- Hech qachon tashxis qo'ymang
+- Har doim shifokorga murojaat qilishni tavsiya qiling
+- Do'stona va tushunarli bo'ling
+- Og'ir belgilar bo'lsa (kuchli og'riq, shish, harorat) — shoshilinch tashrif tavsiya qiling`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 500,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: symptoms }],
+      }),
+    });
+    const data = await res.json();
+    return data.content?.[0]?.text || null;
+  } catch(e) {
+    return null;
+  }
+}
 
 // ─── Назад к списку услуг ─────────────────────────────────
 bot.action('back_to_services', async (ctx) => {
@@ -273,23 +358,46 @@ bot.action(/review_skip_(\d+)/, async (ctx) => {
   delete userState[ctx.from.id];
 });
 
-// Текстовый комментарий к отзыву
+// Текстовые сообщения — симптомы или комментарий к отзыву
 bot.on('text', async (ctx) => {
   const state = userState[ctx.from.id];
-  if (!state?.reviewApptId) return;
-  const lang = state.lang || 'ru';
-  const patient = db.upsertPatient(ctx.from.id, ctx.from.first_name || '');
-  const review = db.getReviewByAppointment(state.reviewApptId);
-  if (review) {
-    db.saveReview(patient.id, state.reviewApptId, review.rating, ctx.message.text);
+  const lang = state?.lang || 'ru';
+  const t = TEXTS[lang];
+
+  // ИИ-консультация по симптомам
+  if (state?.waitingForSymptoms) {
+    userState[ctx.from.id] = { ...state, waitingForSymptoms: false };
+    const thinking = await ctx.reply(t.aiThinking);
+    const answer = await askClaude(ctx.message.text, lang);
+    try { await ctx.telegram.deleteMessage(ctx.chat.id, thinking.message_id); } catch(e) {}
+
+    if (!answer) {
+      await ctx.reply(t.aiError);
+      return;
+    }
+
+    await ctx.reply(answer + t.aiBooking,
+      Markup.inlineKeyboard([
+        [Markup.button.callback(t.aiBookBtn, 'ai_book')],
+        [Markup.button.callback(t.aiSkipBtn, 'ai_skip')],
+      ])
+    );
+    return;
   }
-  await ctx.reply(TEXTS[lang].reviewThanks(review?.rating || 5));
-  if (ADMIN_CHAT_ID && ctx.message.text) {
-    bot.telegram.sendMessage(ADMIN_CHAT_ID,
-      `💬 Комментарий к отзыву от ${ctx.from.first_name || ''}:\n"${ctx.message.text}"`
-    ).catch(() => {});
+
+  // Комментарий к отзыву
+  if (state?.reviewApptId) {
+    const patient = db.upsertPatient(ctx.from.id, ctx.from.first_name || '');
+    const review = db.getReviewByAppointment(state.reviewApptId);
+    if (review) db.saveReview(patient.id, state.reviewApptId, review.rating, ctx.message.text);
+    await ctx.reply(t.reviewThanks(review?.rating || 5));
+    if (ADMIN_CHAT_ID && ctx.message.text) {
+      bot.telegram.sendMessage(ADMIN_CHAT_ID,
+        `💬 Комментарий к отзыву от ${ctx.from.first_name || ''}:\n"${ctx.message.text}"`
+      ).catch(() => {});
+    }
+    delete userState[ctx.from.id];
   }
-  delete userState[ctx.from.id];
 });
 
 // ─── Каждый день в 10:00 — запрос отзыва после вчерашних визитов ──
