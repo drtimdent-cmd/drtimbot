@@ -537,6 +537,27 @@ bot.action(/dayon_(.+)/, async (ctx) => {
   await ctx.editMessageText(`✅ ${db.formatDate(dateStr)} снова открыт для записи.`);
 });
 
+// ─── /backup (только для врача) — копия базы в Telegram ──
+async function sendBackup(chatId) {
+  const dest = '/tmp/clinic-backup.db';
+  await db.backupTo(dest);
+  const c = db.getDbCounts();
+  const today = db.tashkentToday();
+  await bot.telegram.sendDocument(chatId,
+    { source: dest, filename: `clinic-backup-${today}.db` },
+    { caption: `💾 Резервная копия базы за ${today}\nПациентов: ${c.patients} | Записей: ${c.appointments} | Отзывов: ${c.reviews}\n\nСохраните файл — по нему можно полностью восстановить данные.` }
+  );
+}
+
+bot.command('backup', async (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  try {
+    await sendBackup(ctx.chat.id);
+  } catch (e) {
+    ctx.reply('Не удалось создать бэкап: ' + e.message);
+  }
+});
+
 // ─── /slots (только для врача) — диагностика расписания ──
 bot.command('slots', (ctx) => {
   if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
@@ -727,6 +748,12 @@ cron.schedule('0 8 * * *', () => {
   bot.telegram.sendMessage(ADMIN_CHAT_ID, todayScheduleText()).catch(() => {});
 }, { timezone: 'Asia/Tashkent' });
 
+// ─── Каждое воскресенье в 20:00 (Ташкент) — автобэкап базы врачу ──
+cron.schedule('0 20 * * 0', () => {
+  if (!ADMIN_CHAT_ID) return;
+  sendBackup(ADMIN_CHAT_ID).catch((e) => console.log('Ошибка автобэкапа:', e.message));
+}, { timezone: 'Asia/Tashkent' });
+
 // ─── Напоминания — каждый час ─────────────────────────────
 cron.schedule('0 * * * *', async () => {
   const upcoming = db.getAppointmentsInTwoHours();
@@ -758,6 +785,7 @@ if (ADMIN_CHAT_ID) {
     { command: 'admincancel',  description: 'Отменить запись пациента' },
     { command: 'dayoff',       description: 'Закрыть день (выходной)' },
     { command: 'dayon',        description: 'Открыть закрытый день' },
+    { command: 'backup',       description: 'Скачать копию базы' },
     { command: 'slots',        description: 'Диагностика расписания' },
     { command: 'resetdb',      description: 'Сбросить слоты расписания' },
   ], { scope: { type: 'chat', chat_id: Number(ADMIN_CHAT_ID) } })
