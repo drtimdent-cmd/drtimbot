@@ -515,6 +515,24 @@ cron.schedule('0 * * * *', async () => {
   }
 });
 
+// ─── Меню команд (кнопка "/" рядом с полем ввода) ─────────
+// Пациенты видят только start и cancel, врач — все команды
+bot.telegram.setMyCommands([
+  { command: 'start',  description: 'Записаться на приём / Qabulga yozilish' },
+  { command: 'cancel', description: 'Отменить запись / Yozuvni bekor qilish' },
+]).catch((e) => console.log('Не удалось задать команды:', e.message));
+
+if (ADMIN_CHAT_ID) {
+  bot.telegram.setMyCommands([
+    { command: 'start',        description: 'Записаться на приём' },
+    { command: 'cancel',       description: 'Отменить свою запись' },
+    { command: 'appointments', description: 'Список всех записей' },
+    { command: 'admincancel',  description: 'Отменить запись пациента' },
+    { command: 'resetdb',      description: 'Сбросить слоты расписания' },
+  ], { scope: { type: 'chat', chat_id: Number(ADMIN_CHAT_ID) } })
+    .catch((e) => console.log('Не удалось задать команды админа:', e.message));
+}
+
 bot.launch();
 console.log(`Bot ishga tushdi / Бот запущен: ${CLINIC_NAME}`);
 process.once('SIGINT', () => bot.stop('SIGINT'));
