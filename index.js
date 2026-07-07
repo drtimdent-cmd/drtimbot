@@ -46,6 +46,10 @@ const TEXTS = {
     aiSkipBtn:    'Не сейчас',
     cancelDone:   (date, time) => `❌ Запись на ${date} в ${time} отменена. Если хотите записаться снова — /start`,
     cancelNone:   'У вас нет активных записей. Записаться — /start',
+    waitlistBtn:  '🔔 Встать в список ожидания',
+    waitlistAdded:'✅ Вы в списке ожидания! Как только освободится место, мы сразу пришлём вам уведомление.',
+    waitlistAlready:'Вы уже в списке ожидания. Как только появится место — сообщим!',
+    waitlistNotify:(date, time) => `🔔 Хорошая новость! Освободилось место в ${CLINIC_NAME}:\n\n📅 ${date}, ${time}\n\nЧтобы записаться, нажмите /start и выберите это время. Поторопитесь — место могут занять!`,
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
   },
   uz: {
@@ -72,6 +76,10 @@ const TEXTS = {
     aiSkipBtn:    'Hozir emas',
     cancelDone:   (date, time) => `❌ ${date} kuni ${time} dagi yozuv bekor qilindi. Qayta yozilish uchun — /start`,
     cancelNone:   "Sizda faol yozuvlar yo'q. Yozilish uchun — /start",
+    waitlistBtn:  "🔔 Navbatga turish",
+    waitlistAdded:"✅ Siz navbatdasiz! Joy bo'shashi bilan darhol xabar yuboramiz.",
+    waitlistAlready:"Siz allaqachon navbatdasiz. Joy paydo bo'lishi bilan xabar beramiz!",
+    waitlistNotify:(date, time) => `🔔 Yaxshi yangilik! ${CLINIC_NAME} klinikasida joy bo'shadi:\n\n📅 ${date}, ${time}\n\nYozilish uchun /start bosing va shu vaqtni tanlang. Shoshiling — joyni band qilishlari mumkin!`,
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
   },
 };
@@ -113,7 +121,12 @@ bot.action(/service_(.+)/, async (ctx) => {
   userState[ctx.from.id] = { lang, service: service[lang], serviceIcon: service.icon, serviceId: service.id };
 
   const dates = db.getAvailableDates();
-  if (!dates.length) { await ctx.editMessageText(TEXTS[lang].noSlots); return; }
+  if (!dates.length) {
+    await ctx.editMessageText(TEXTS[lang].noSlots,
+      Markup.inlineKeyboard([[Markup.button.callback(TEXTS[lang].waitlistBtn, 'waitlist_join')]])
+    );
+    return;
+  }
 
   const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
   const rows = [];
@@ -127,6 +140,39 @@ ${TEXTS[lang].chooseDate}`,
     Markup.inlineKeyboard(rows)
   );
 });
+
+// ─── Список ожидания: пациент встаёт в очередь ────────────
+bot.action('waitlist_join', async (ctx) => {
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  const t = TEXTS[lang];
+  const patient = db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
+  const existing = db.addToWaitingList(patient.id, state?.service || '', lang);
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(existing ? t.waitlistAlready : t.waitlistAdded);
+});
+
+// Уведомить первого в очереди об освободившемся месте
+async function notifyWaitingList(slotDate, slotTime) {
+  const first = db.getFirstInWaitingList();
+  if (!first || !first.telegram_id) return;
+  const lang = first.lang === 'uz' ? 'uz' : 'ru';
+  try {
+    await bot.telegram.sendMessage(first.telegram_id,
+      TEXTS[lang].waitlistNotify(db.formatDate(slotDate), slotTime)
+    );
+    db.removeFromWaitingList(first.patient_id);
+    if (ADMIN_CHAT_ID) {
+      bot.telegram.sendMessage(ADMIN_CHAT_ID,
+        `🔔 Пациенту из списка ожидания (${first.name || 'без имени'}) отправлено предложение занять ${db.formatDate(slotDate)}, ${slotTime}`
+      ).catch(() => {});
+    }
+  } catch (e) {
+    // пациент заблокировал бота — убираем из очереди и пробуем следующего
+    db.removeFromWaitingList(first.patient_id);
+    return notifyWaitingList(slotDate, slotTime);
+  }
+}
 
 // ─── ИИ-консультация ──────────────────────────────────────
 bot.action('ai_consult', async (ctx) => {
@@ -256,6 +302,7 @@ bot.action(/date_(.+)/, async (ctx) => {
     const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
     const rows = [];
     for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
+    rows.push([Markup.button.callback(TEXTS[lang].waitlistBtn, 'waitlist_join')]);
     await ctx.editMessageText(TEXTS[lang].noSlotsDate(formattedDate), Markup.inlineKeyboard(rows));
     return;
   }
@@ -322,6 +369,7 @@ bot.command('cancel', async (ctx) => {
   if (!appt) { ctx.reply(t.cancelNone); return; }
   db.cancelAppointment(appt.id);
   ctx.reply(t.cancelDone(db.formatDate(appt.slot_date), appt.slot_time));
+  notifyWaitingList(appt.slot_date, appt.slot_time);
 });
 
 // ─── /resetdb (только для врача) ──────────────────────────
@@ -371,6 +419,7 @@ bot.action(/admcancel_(\d+)/, async (ctx) => {
   await ctx.editMessageText(
     `✅ Запись отменена:\n${formattedDate}, ${appt.slot_time} — ${appt.name || 'Без имени'} (${appt.phone || '—'})\n${appt.service}\n\nСлот снова свободен, пациент получил уведомление.`
   );
+  notifyWaitingList(appt.slot_date, appt.slot_time);
 });
 
 // ─── /appointments (только для врача) ────────────────────
@@ -498,6 +547,28 @@ cron.schedule('0 0 * * *', () => {
 cron.schedule('0 0 * * 0', () => {
   db.refillSlots();
   console.log('Расписание пополнено на следующие 14 дней');
+}, { timezone: 'Asia/Tashkent' });
+
+// ─── Каждый понедельник в 09:00 (Ташкент) — недельный отчёт врачу ──
+cron.schedule('0 9 * * 1', async () => {
+  if (!ADMIN_CHAT_ID) return;
+  const s = db.getWeeklyStats();
+  const services = s.topServices.length
+    ? s.topServices.map((x, i) => `${i + 1}. ${x.service} — ${x.c}`).join('\n')
+    : 'нет данных';
+  const rating = s.avgRating?.c ? `${s.avgRating.r}⭐ (${s.avgRating.c} отзывов)` : 'отзывов не было';
+
+  const text =
+    `📊 Отчёт за неделю — ${CLINIC_NAME}\n\n` +
+    `📝 Новых записей: ${s.created}\n` +
+    `✅ Состоявшихся визитов: ${s.held}\n` +
+    `❌ Отмен: ${s.cancelled}\n` +
+    `📅 Записей на предстоящую неделю: ${s.upcoming}\n` +
+    `🔔 В списке ожидания: ${s.waiting}\n\n` +
+    `Популярные услуги за неделю:\n${services}\n\n` +
+    `Средняя оценка: ${rating}`;
+
+  bot.telegram.sendMessage(ADMIN_CHAT_ID, text).catch(() => {});
 }, { timezone: 'Asia/Tashkent' });
 
 // ─── Напоминания — каждый час ─────────────────────────────

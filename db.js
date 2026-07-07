@@ -1,5 +1,7 @@
 const Database = require('better-sqlite3');
-const db = new Database('clinic.db');
+// DB_PATH задаётся в Railway Variables (например /data/clinic.db на volume),
+// локально по умолчанию — clinic.db рядом с кодом
+const db = new Database(process.env.DB_PATH || 'clinic.db');
 
 // ─── Часовой пояс клиники: Ташкент, UTC+5 (без перехода на летнее время) ───
 // Сервер Railway живёт по UTC, поэтому все "сегодня/сейчас" считаем со сдвигом.
@@ -41,6 +43,14 @@ CREATE TABLE IF NOT EXISTS slots (
   slot_date TEXT,
   slot_time TEXT,
   is_booked INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS waiting_list (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  patient_id INTEGER UNIQUE,
+  service TEXT,
+  lang TEXT DEFAULT 'ru',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (patient_id) REFERENCES patients(id)
 );
 CREATE TABLE IF NOT EXISTS reviews (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,6 +264,69 @@ function getPatientsForRebooking() {
   `).all(target);
 }
 
+// ─── Список ожидания ──────────────────────────────────────
+// Добавить пациента в очередь (повторное добавление обновляет услугу, место в очереди сохраняется)
+function addToWaitingList(patientId, service, lang) {
+  const existing = db.prepare('SELECT * FROM waiting_list WHERE patient_id = ?').get(patientId);
+  if (existing) {
+    db.prepare('UPDATE waiting_list SET service = ?, lang = ? WHERE patient_id = ?').run(service || existing.service, lang || existing.lang, patientId);
+    return existing;
+  }
+  db.prepare('INSERT INTO waiting_list (patient_id, service, lang) VALUES (?, ?, ?)').run(patientId, service || '', lang || 'ru');
+  return null;
+}
+
+// Первый в очереди (с данными пациента)
+function getFirstInWaitingList() {
+  return db.prepare(`
+    SELECT w.*, p.telegram_id, p.name FROM waiting_list w
+    JOIN patients p ON p.id = w.patient_id
+    WHERE p.telegram_id IS NOT NULL
+    ORDER BY w.created_at, w.id
+    LIMIT 1
+  `).get();
+}
+
+function removeFromWaitingList(patientId) {
+  db.prepare('DELETE FROM waiting_list WHERE patient_id = ?').run(patientId);
+}
+
+function getWaitingListCount() {
+  return db.prepare('SELECT COUNT(*) as c FROM waiting_list').get().c;
+}
+
+// ─── Статистика за неделю (для отчёта врачу) ──────────────
+function getWeeklyStats() {
+  const now = tashkentNow();
+  const weekAgo = new Date(now); weekAgo.setUTCDate(now.getUTCDate() - 7);
+  const weekAhead = new Date(now); weekAhead.setUTCDate(now.getUTCDate() + 7);
+  const today = now.toISOString().slice(0, 10);
+  const from = weekAgo.toISOString().slice(0, 10);
+  const to = weekAhead.toISOString().slice(0, 10);
+
+  const created = db.prepare(
+    "SELECT COUNT(*) as c FROM appointments WHERE created_at >= datetime('now', '-7 days')"
+  ).get().c;
+  const cancelled = db.prepare(
+    "SELECT COUNT(*) as c FROM appointments WHERE status = 'cancelled' AND created_at >= datetime('now', '-7 days')"
+  ).get().c;
+  const held = db.prepare(
+    "SELECT COUNT(*) as c FROM appointments WHERE status = 'booked' AND slot_date >= ? AND slot_date < ?"
+  ).get(from, today).c;
+  const upcoming = db.prepare(
+    "SELECT COUNT(*) as c FROM appointments WHERE status = 'booked' AND slot_date >= ? AND slot_date <= ?"
+  ).get(today, to).c;
+  const topServices = db.prepare(
+    "SELECT service, COUNT(*) as c FROM appointments WHERE created_at >= datetime('now', '-7 days') GROUP BY service ORDER BY c DESC LIMIT 3"
+  ).all();
+  const avgRating = db.prepare(
+    "SELECT ROUND(AVG(rating), 1) as r, COUNT(*) as c FROM reviews WHERE created_at >= datetime('now', '-7 days')"
+  ).get();
+  const waiting = getWaitingListCount();
+
+  return { created, cancelled, held, upcoming, topServices, avgRating, waiting };
+}
+
 module.exports = {
   upsertPatient, savePhone,
   getAvailableSlots, getAvailableDates, getSlotsByDate, getSlotById,
@@ -262,5 +335,7 @@ module.exports = {
   getVisitsForReview, markReviewSent, saveReview, getReviewByAppointment,
   getPatientsForRebooking,
   getUpcomingBookedAppointments, getAppointmentWithPatient,
+  addToWaitingList, getFirstInWaitingList, removeFromWaitingList, getWaitingListCount,
+  getWeeklyStats,
   getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots, deleteOldSlots
 };
