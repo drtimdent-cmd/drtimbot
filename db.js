@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 `);
 
+// Чистим возможные дубли слотов (оставляем занятый, если есть) и запрещаем дубли впредь
+db.exec(`
+DELETE FROM slots WHERE id NOT IN (
+  SELECT (SELECT id FROM slots s2
+          WHERE s2.slot_date = s.slot_date AND s2.slot_time = s.slot_time
+          ORDER BY s2.is_booked DESC, s2.id LIMIT 1)
+  FROM (SELECT DISTINCT slot_date, slot_time FROM slots) s
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_slots_unique ON slots(slot_date, slot_time);
+`);
+
 function upsertPatient(telegramId, name) {
   const existing = db.prepare('SELECT * FROM patients WHERE telegram_id = ?').get(telegramId);
   if (existing) return existing;
@@ -177,42 +188,31 @@ function formatDate(dateStr) {
   return `${day}.${month} (${weekday})`;
 }
 
-function seedSlotsIfEmpty() {
-  const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
-  if (count > 0) return;
-
-  // Слоты на 14 дней вперёд, пн-сб, 9:00-17:00 (от сегодняшней даты в Ташкенте)
+// Создаёт слоты на 14 дней вперёд от сегодня (Ташкент), пн-сб, 9:00-17:00.
+// Уже существующие слоты (в т.ч. занятые) не трогает — благодаря уникальному индексу.
+function generateSlots() {
   const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
-  const insert = db.prepare('INSERT INTO slots (slot_date, slot_time) VALUES (?, ?)');
+  const insert = db.prepare('INSERT OR IGNORE INTO slots (slot_date, slot_time) VALUES (?, ?)');
   const today = tashkentNow();
   for (let i = 0; i < 14; i++) {
     const d = new Date(today);
     d.setUTCDate(today.getUTCDate() + i);
     if (d.getUTCDay() === 0) continue; // воскресенье
-    const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD — правильный формат
+    const dateStr = d.toISOString().slice(0, 10);
     for (const t of times) insert.run(dateStr, t);
   }
 }
 
-// Добавляет слоты на следующие 14 дней если их осталось меньше 7
+function seedSlotsIfEmpty() {
+  const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
+  if (count > 0) return;
+  generateSlots();
+}
+
+// Пополняет расписание: добавляет недостающие слоты так, чтобы всегда было 14 дней вперёд.
+// Существующие (в т.ч. занятые) слоты не трогает.
 function refillSlots() {
-  const last = db.prepare(
-    'SELECT slot_date FROM slots ORDER BY slot_date DESC LIMIT 1'
-  ).get();
-
-  const startDate = last ? new Date(last.slot_date) : tashkentNow();
-  startDate.setUTCDate(startDate.getUTCDate() + 1);
-
-  const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
-  const insert = db.prepare('INSERT OR IGNORE INTO slots (slot_date, slot_time) VALUES (?, ?)');
-
-  for (let i = 0; i < 14; i++) {
-    const d = new Date(startDate);
-    d.setUTCDate(startDate.getUTCDate() + i);
-    if (d.getUTCDay() === 0) continue;
-    const dateStr = d.toISOString().slice(0, 10);
-    for (const t of times) insert.run(dateStr, t);
-  }
+  generateSlots();
 }
 
 // Удаляет прошедшие незабронированные слоты (по ташкентской дате)
@@ -222,7 +222,7 @@ function deleteOldSlots() {
 
 function resetSlots() {
   db.prepare('DELETE FROM slots WHERE is_booked = 0').run();
-  seedSlotsIfEmpty();
+  generateSlots(); // пересоздаёт расписание всегда, а не только при пустой таблице
 }
 
 // Визиты вчерашнего дня которым ещё не отправлен запрос отзыва
