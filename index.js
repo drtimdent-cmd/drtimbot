@@ -51,6 +51,10 @@ const TEXTS = {
     waitlistAlready:'Вы уже в списке ожидания. Как только появится место — сообщим!',
     waitlistBtnDate:(date) => `🔔 В список ожидания на ${date}`,
     waitlistAddedDate:(date) => `✅ Вы в списке ожидания на ${date}! Если на этот день освободится место — мы сразу пришлём вам уведомление.`,
+    confirmQuestion:(date, time) => `👋 Напоминаем: завтра, ${date} в ${time}, у вас приём в ${CLINIC_NAME}.\n\nВы придёте?`,
+    confirmYesBtn:  '✅ Приду',
+    confirmNoBtn:   '❌ Отменить запись',
+    confirmThanks:  '👍 Отлично, ждём вас! Напоминание придёт за 2 часа до приёма.',
     waitlistNotify:(date, time) => `🔔 Хорошая новость! Освободилось место в ${CLINIC_NAME}:\n\n📅 ${date}, ${time}\n\nЧтобы записаться, нажмите /start и выберите это время. Поторопитесь — место могут занять!`,
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
   },
@@ -83,6 +87,10 @@ const TEXTS = {
     waitlistAlready:"Siz allaqachon navbatdasiz. Joy paydo bo'lishi bilan xabar beramiz!",
     waitlistBtnDate:(date) => `🔔 ${date} kuniga navbatga turish`,
     waitlistAddedDate:(date) => `✅ Siz ${date} kuni uchun navbatdasiz! Shu kunga joy bo'shasa — darhol xabar yuboramiz.`,
+    confirmQuestion:(date, time) => `👋 Eslatamiz: ertaga, ${date} kuni soat ${time} da ${CLINIC_NAME} klinikasida qabulingiz bor.\n\nKelasizmi?`,
+    confirmYesBtn:  '✅ Kelaman',
+    confirmNoBtn:   '❌ Yozuvni bekor qilish',
+    confirmThanks:  "👍 Ajoyib, sizni kutamiz! Qabuldan 2 soat oldin eslatma keladi.",
     waitlistNotify:(date, time) => `🔔 Yaxshi yangilik! ${CLINIC_NAME} klinikasida joy bo'shadi:\n\n📅 ${date}, ${time}\n\nYozilish uchun /start bosing va shu vaqtni tanlang. Shoshiling — joyni band qilishlari mumkin!`,
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
   },
@@ -106,6 +114,7 @@ bot.action(/lang_(.+)/, async (ctx) => {
   const lang = ctx.match[1];
   const name = ctx.from.first_name || (lang === 'ru' ? 'Гость' : 'Mehmon');
   db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
+  db.savePatientLang(ctx.from.id, lang);
   userState[ctx.from.id] = { lang };
   const t = TEXTS[lang];
   await ctx.editMessageText(t.welcome(name),
@@ -173,6 +182,32 @@ bot.action(/wljoin_(.+)/, async (ctx) => {
   db.addToWaitingList(patient.id, state?.service || '', lang, dateStr);
   await ctx.answerCbQuery();
   await ctx.editMessageText(t.waitlistAddedDate(db.formatDate(dateStr)));
+});
+
+// Пациент подтвердил завтрашний визит
+bot.action(/apptconfirm_(\d+)/, async (ctx) => {
+  const appt = db.getAppointmentWithPatient(parseInt(ctx.match[1]));
+  const lang = userState[ctx.from.id]?.lang || (appt && appt.lang) || 'ru';
+  if (appt && appt.status === 'booked') db.markConfirmed(appt.id);
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(TEXTS[lang === 'uz' ? 'uz' : 'ru'].confirmThanks);
+});
+
+// Пациент отменил запись из вечернего напоминания
+bot.action(/apptcancel_(\d+)/, async (ctx) => {
+  const appt = db.getAppointmentWithPatient(parseInt(ctx.match[1]));
+  const lang0 = userState[ctx.from.id]?.lang || 'ru';
+  const t = TEXTS[lang0];
+  await ctx.answerCbQuery();
+  if (!appt || appt.status !== 'booked') { await ctx.editMessageText(t.cancelNone); return; }
+  db.cancelAppointment(appt.id);
+  await ctx.editMessageText(t.cancelDone(db.formatDate(appt.slot_date), appt.slot_time));
+  if (ADMIN_CHAT_ID) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID,
+      `❌ Пациент отменил запись (из напоминания):\n${appt.name || 'Без имени'} (${appt.phone || '—'}) — ${db.formatDate(appt.slot_date)}, ${appt.slot_time}\n${appt.service}`
+    ).catch(() => {});
+  }
+  if (!db.isDateBlocked(appt.slot_date)) notifyWaitingList(appt.slot_date, appt.slot_time);
 });
 
 // Уведомить первого в очереди об освободившемся месте
@@ -393,7 +428,12 @@ bot.command('cancel', async (ctx) => {
   if (!appt) { ctx.reply(t.cancelNone); return; }
   db.cancelAppointment(appt.id);
   ctx.reply(t.cancelDone(db.formatDate(appt.slot_date), appt.slot_time));
-  notifyWaitingList(appt.slot_date, appt.slot_time);
+  if (ADMIN_CHAT_ID) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID,
+      `❌ Пациент отменил запись:\n${ctx.from.first_name || ''} ${ctx.from.last_name || ''} — ${db.formatDate(appt.slot_date)}, ${appt.slot_time}\n${appt.service}`
+    ).catch(() => {});
+  }
+  if (!db.isDateBlocked(appt.slot_date)) notifyWaitingList(appt.slot_date, appt.slot_time);
 });
 
 // ─── /resetdb (только для врача) ──────────────────────────
@@ -444,6 +484,57 @@ bot.action(/admcancel_(\d+)/, async (ctx) => {
     `✅ Запись отменена:\n${formattedDate}, ${appt.slot_time} — ${appt.name || 'Без имени'} (${appt.phone || '—'})\n${appt.service}\n\nСлот снова свободен, пациент получил уведомление.`
   );
   notifyWaitingList(appt.slot_date, appt.slot_time);
+});
+
+// ─── /today (только для врача) — записи на сегодня ───────
+function todayScheduleText() {
+  const list = db.getTodaysAppointments();
+  if (!list.length) return '📅 На сегодня записей нет.';
+  const lines = list.map(a =>
+    `${a.slot_time} — ${a.name || 'Без имени'} (${a.phone || '—'})\n   ${a.service}${a.confirmed ? ' ✅ подтвердил' : ''}`
+  );
+  return `📅 Записи на сегодня (${list.length}):\n\n${lines.join('\n\n')}`;
+}
+
+bot.command('today', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  ctx.reply(todayScheduleText());
+});
+
+// ─── /dayoff и /dayon (только для врача) — закрыть/открыть день ──
+bot.command('dayoff', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  const dates = db.getDatesWithStatus();
+  if (!dates.length) { ctx.reply('Открытых дней в расписании нет.'); return; }
+  const rows = dates.map(d => [Markup.button.callback(db.formatDate(d.slot_date), `dayoff_${d.slot_date}`)]);
+  ctx.reply('Какой день закрыть для записи?', Markup.inlineKeyboard(rows));
+});
+
+bot.action(/dayoff_(.+)/, async (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { await ctx.answerCbQuery('Только для администратора'); return; }
+  const dateStr = ctx.match[1];
+  const { bookedLeft } = db.blockDate(dateStr);
+  await ctx.answerCbQuery('День закрыт');
+  let msg = `🚫 ${db.formatDate(dateStr)} закрыт для записи — пациенты этот день больше не видят.`;
+  if (bookedLeft > 0) msg += `\n\n⚠️ На этот день уже есть записей: ${bookedLeft}. Отмените их через /admincancel — пациенты получат уведомления.`;
+  msg += `\n\nОткрыть день обратно — /dayon`;
+  await ctx.editMessageText(msg);
+});
+
+bot.command('dayon', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  const dates = db.getBlockedDates();
+  if (!dates.length) { ctx.reply('Закрытых дней нет.'); return; }
+  const rows = dates.map(d => [Markup.button.callback(db.formatDate(d), `dayon_${d}`)]);
+  ctx.reply('Какой день открыть для записи?', Markup.inlineKeyboard(rows));
+});
+
+bot.action(/dayon_(.+)/, async (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { await ctx.answerCbQuery('Только для администратора'); return; }
+  const dateStr = ctx.match[1];
+  db.unblockDate(dateStr);
+  await ctx.answerCbQuery('День открыт');
+  await ctx.editMessageText(`✅ ${db.formatDate(dateStr)} снова открыт для записи.`);
 });
 
 // ─── /slots (только для врача) — диагностика расписания ──
@@ -609,6 +700,33 @@ cron.schedule('0 9 * * 1', async () => {
   bot.telegram.sendMessage(ADMIN_CHAT_ID, text).catch(() => {});
 }, { timezone: 'Asia/Tashkent' });
 
+// ─── Каждый день в 19:00 (Ташкент) — просим подтвердить завтрашний визит ──
+cron.schedule('0 19 * * *', async () => {
+  const list = db.getTomorrowsUnconfirmed();
+  for (const a of list) {
+    const lang = a.lang === 'uz' ? 'uz' : 'ru';
+    const t = TEXTS[lang];
+    try {
+      await bot.telegram.sendMessage(a.telegram_id,
+        t.confirmQuestion(db.formatDate(a.slot_date), a.slot_time),
+        Markup.inlineKeyboard([
+          [Markup.button.callback(t.confirmYesBtn, `apptconfirm_${a.id}`)],
+          [Markup.button.callback(t.confirmNoBtn, `apptcancel_${a.id}`)],
+        ])
+      );
+      db.markConfirmSent(a.id);
+    } catch (e) { db.markConfirmSent(a.id); /* пациент заблокировал бота */ }
+  }
+}, { timezone: 'Asia/Tashkent' });
+
+// ─── Каждый день в 08:00 (Ташкент) — расписание дня врачу ──
+cron.schedule('0 8 * * *', () => {
+  if (!ADMIN_CHAT_ID) return;
+  const list = db.getTodaysAppointments();
+  if (!list.length) return; // пустой день — не беспокоим
+  bot.telegram.sendMessage(ADMIN_CHAT_ID, todayScheduleText()).catch(() => {});
+}, { timezone: 'Asia/Tashkent' });
+
 // ─── Напоминания — каждый час ─────────────────────────────
 cron.schedule('0 * * * *', async () => {
   const upcoming = db.getAppointmentsInTwoHours();
@@ -635,8 +753,12 @@ if (ADMIN_CHAT_ID) {
   bot.telegram.setMyCommands([
     { command: 'start',        description: 'Записаться на приём' },
     { command: 'cancel',       description: 'Отменить свою запись' },
+    { command: 'today',        description: 'Записи на сегодня' },
     { command: 'appointments', description: 'Список всех записей' },
     { command: 'admincancel',  description: 'Отменить запись пациента' },
+    { command: 'dayoff',       description: 'Закрыть день (выходной)' },
+    { command: 'dayon',        description: 'Открыть закрытый день' },
+    { command: 'slots',        description: 'Диагностика расписания' },
     { command: 'resetdb',      description: 'Сбросить слоты расписания' },
   ], { scope: { type: 'chat', chat_id: Number(ADMIN_CHAT_ID) } })
     .catch((e) => console.log('Не удалось задать команды админа:', e.message));

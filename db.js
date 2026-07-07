@@ -63,8 +63,12 @@ CREATE TABLE IF NOT EXISTS reviews (
 );
 `);
 
-// Миграция: колонка даты в списке ожидания (ошибка "duplicate column" игнорируется)
+// Миграции для существующих баз (ошибка "duplicate column" игнорируется)
 try { db.exec('ALTER TABLE waiting_list ADD COLUMN slot_date TEXT'); } catch (e) {}
+try { db.exec('ALTER TABLE slots ADD COLUMN is_blocked INTEGER DEFAULT 0'); } catch (e) {}
+try { db.exec('ALTER TABLE appointments ADD COLUMN confirm_sent INTEGER DEFAULT 0'); } catch (e) {}
+try { db.exec('ALTER TABLE appointments ADD COLUMN confirmed INTEGER DEFAULT 0'); } catch (e) {}
+try { db.exec("ALTER TABLE patients ADD COLUMN lang TEXT DEFAULT 'ru'"); } catch (e) {}
 
 // Чистим возможные дубли слотов (оставляем занятый, если есть) и запрещаем дубли впредь
 db.exec(`
@@ -84,23 +88,32 @@ function upsertPatient(telegramId, name) {
   return db.prepare('SELECT * FROM patients WHERE id = ?').get(info.lastInsertRowid);
 }
 
+function savePatientLang(telegramId, lang) {
+  db.prepare('UPDATE patients SET lang = ? WHERE telegram_id = ?').run(lang, telegramId);
+}
+
 function savePhone(telegramId, phone) {
   db.prepare('UPDATE patients SET phone = ? WHERE telegram_id = ?').run(phone, telegramId);
 }
 
 function getAvailableSlots() {
-  return db.prepare('SELECT * FROM slots WHERE is_booked = 0 ORDER BY slot_date, slot_time').all();
+  return db.prepare('SELECT * FROM slots WHERE is_booked = 0 AND is_blocked = 0 ORDER BY slot_date, slot_time').all();
 }
 
-// Все предстоящие даты с флагом: есть ли свободные места
+// Все предстоящие даты с флагом наличия мест.
+// Полностью закрытые врачом дни (/dayoff) в список не попадают вовсе.
 function getDatesWithStatus() {
   return db.prepare(`
-    SELECT slot_date, MAX(CASE WHEN is_booked = 0 THEN 1 ELSE 0 END) as has_free
+    SELECT slot_date,
+      SUM(CASE WHEN is_booked = 0 AND is_blocked = 0 THEN 1 ELSE 0 END) as free_cnt,
+      SUM(CASE WHEN is_blocked = 1 THEN 1 ELSE 0 END) as blocked_cnt
     FROM slots
     WHERE slot_date >= ?
     GROUP BY slot_date
     ORDER BY slot_date
-  `).all(tashkentToday());
+  `).all(tashkentToday())
+    .filter(d => !(d.free_cnt === 0 && d.blocked_cnt > 0)) // день закрыт врачом — скрываем
+    .map(d => ({ slot_date: d.slot_date, has_free: d.free_cnt > 0 ? 1 : 0 }));
 }
 
 // Уникальные даты с хотя бы одним свободным слотом
@@ -113,7 +126,7 @@ function getAvailableDates() {
 // Свободные слоты на конкретную дату
 function getSlotsByDate(dateStr) {
   return db.prepare(
-    'SELECT * FROM slots WHERE is_booked = 0 AND slot_date = ? ORDER BY slot_time'
+    'SELECT * FROM slots WHERE is_booked = 0 AND is_blocked = 0 AND slot_date = ? ORDER BY slot_time'
   ).all(dateStr);
 }
 
@@ -123,7 +136,7 @@ function getSlotById(slotId) {
 
 function bookSlot(slotId, patientId, service) {
   const slot = db.prepare('SELECT * FROM slots WHERE id = ?').get(slotId);
-  if (!slot || slot.is_booked) return null;
+  if (!slot || slot.is_booked || slot.is_blocked) return null;
   db.prepare('UPDATE slots SET is_booked = 1 WHERE id = ?').run(slotId);
   const info = db.prepare(
     'INSERT INTO appointments (patient_id, service, slot_date, slot_time) VALUES (?, ?, ?, ?)'
@@ -141,7 +154,34 @@ function cancelAppointment(appointmentId) {
   const appt = db.prepare('SELECT * FROM appointments WHERE id = ?').get(appointmentId);
   if (!appt) return;
   db.prepare("UPDATE appointments SET status = 'cancelled' WHERE id = ?").run(appointmentId);
-  db.prepare('UPDATE slots SET is_booked = 0 WHERE slot_date = ? AND slot_time = ?').run(appt.slot_date, appt.slot_time);
+  // Если день закрыт врачом — освободившийся слот тоже блокируем, чтобы на него не записались
+  const blocked = isDateBlocked(appt.slot_date) ? 1 : 0;
+  db.prepare('UPDATE slots SET is_booked = 0, is_blocked = ? WHERE slot_date = ? AND slot_time = ?')
+    .run(blocked, appt.slot_date, appt.slot_time);
+}
+
+function isDateBlocked(dateStr) {
+  const r = db.prepare('SELECT COUNT(*) as c FROM slots WHERE slot_date = ? AND is_blocked = 1').get(dateStr);
+  return r.c > 0;
+}
+
+// Закрыть день: свободные слоты блокируются, занятые остаются (их отменять через /admincancel)
+function blockDate(dateStr) {
+  db.prepare('UPDATE slots SET is_blocked = 1 WHERE slot_date = ? AND is_booked = 0').run(dateStr);
+  const bookedLeft = db.prepare(
+    "SELECT COUNT(*) as c FROM appointments WHERE slot_date = ? AND status = 'booked'"
+  ).get(dateStr).c;
+  return { bookedLeft };
+}
+
+function unblockDate(dateStr) {
+  db.prepare('UPDATE slots SET is_blocked = 0 WHERE slot_date = ?').run(dateStr);
+}
+
+function getBlockedDates() {
+  return db.prepare(
+    'SELECT DISTINCT slot_date FROM slots WHERE is_blocked = 1 AND slot_date >= ? ORDER BY slot_date'
+  ).all(tashkentToday()).map(r => r.slot_date);
 }
 
 // Находим записи ровно через 2 часа от текущего момента (по ташкентскому времени)
@@ -323,6 +363,37 @@ function getWaitingListCount() {
   return db.prepare('SELECT COUNT(*) as c FROM waiting_list').get().c;
 }
 
+// Завтрашние записи, которым ещё не отправлен запрос подтверждения
+function getTomorrowsUnconfirmed() {
+  const t = tashkentNow();
+  t.setUTCDate(t.getUTCDate() + 1);
+  const tomorrow = t.toISOString().slice(0, 10);
+  return db.prepare(`
+    SELECT a.*, p.telegram_id, p.name, p.lang FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.status = 'booked' AND a.slot_date = ? AND a.confirm_sent = 0
+      AND p.telegram_id IS NOT NULL
+  `).all(tomorrow);
+}
+
+function markConfirmSent(appointmentId) {
+  db.prepare('UPDATE appointments SET confirm_sent = 1 WHERE id = ?').run(appointmentId);
+}
+
+function markConfirmed(appointmentId) {
+  db.prepare('UPDATE appointments SET confirmed = 1 WHERE id = ?').run(appointmentId);
+}
+
+// Записи на сегодня (для утреннего дайджеста и /today)
+function getTodaysAppointments() {
+  return db.prepare(`
+    SELECT a.*, p.name, p.phone FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.status = 'booked' AND a.slot_date = ?
+    ORDER BY a.slot_time
+  `).all(tashkentToday());
+}
+
 // ─── Диагностика расписания (для команды /slots) ──────────
 function getSlotsDiagnostics() {
   const total = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
@@ -365,7 +436,7 @@ function getWeeklyStats() {
 }
 
 module.exports = {
-  upsertPatient, savePhone,
+  upsertPatient, savePhone, savePatientLang,
   getAvailableSlots, getAvailableDates, getDatesWithStatus, getSlotsByDate, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
   getAppointmentsInTwoHours, markReminded, formatDate,
@@ -374,5 +445,7 @@ module.exports = {
   getUpcomingBookedAppointments, getAppointmentWithPatient,
   addToWaitingList, getFirstInWaitingList, removeFromWaitingList, getWaitingListCount,
   getWeeklyStats, getSlotsDiagnostics,
+  isDateBlocked, blockDate, unblockDate, getBlockedDates,
+  getTomorrowsUnconfirmed, markConfirmSent, markConfirmed, getTodaysAppointments,
   getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots, deleteOldSlots
 };
