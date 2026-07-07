@@ -394,6 +394,24 @@ function getTodaysAppointments() {
   `).all(tashkentToday());
 }
 
+// ─── Данные для веб-панели и экспорта ─────────────────────
+function getAllPatients() {
+  return db.prepare('SELECT * FROM patients ORDER BY created_at DESC').all();
+}
+
+function getAllReviews() {
+  return db.prepare(`
+    SELECT r.*, p.name FROM reviews r
+    JOIN patients p ON p.id = r.patient_id
+    ORDER BY r.created_at DESC
+  `).all();
+}
+
+function getOverallRating() {
+  const r = db.prepare('SELECT ROUND(AVG(rating), 1) as avg FROM reviews').get();
+  return r.avg;
+}
+
 // ─── Бэкап базы ────────────────────────────────────────────
 // Безопасная копия через встроенный механизм SQLite (работает на живой базе)
 function backupTo(destPath) {
@@ -459,6 +477,7 @@ module.exports = {
   getUpcomingBookedAppointments, getAppointmentWithPatient,
   addToWaitingList, getFirstInWaitingList, removeFromWaitingList, getWaitingListCount,
   getWeeklyStats, getSlotsDiagnostics, backupTo, getDbCounts, tashkentToday,
+  getAllPatients, getAllReviews, getOverallRating,
   isDateBlocked, blockDate, unblockDate, getBlockedDates,
   getTomorrowsUnconfirmed, markConfirmSent, markConfirmed, getTodaysAppointments,
   getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots, deleteOldSlots

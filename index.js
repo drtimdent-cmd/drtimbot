@@ -537,6 +537,44 @@ bot.action(/dayon_(.+)/, async (ctx) => {
   await ctx.editMessageText(`✅ ${db.formatDate(dateStr)} снова открыт для записи.`);
 });
 
+// ─── /export (только для врача) — данные в Excel (CSV) ──
+function toCsv(rows) {
+  const escape = (v) => {
+    const s = String(v == null ? '' : v);
+    return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  return '\uFEFF' + rows.map(r => r.map(escape).join(';')).join('\r\n');
+}
+
+bot.command('export', async (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  try {
+    const today = db.tashkentToday();
+
+    const patients = db.getAllPatients();
+    const pRows = [['Имя', 'Телефон', 'Язык', 'Дата добавления']];
+    for (const p of patients) pRows.push([p.name, p.phone, p.lang === 'uz' ? 'узбекский' : 'русский', (p.created_at || '').slice(0, 10)]);
+
+    const appts = db.getAllAppointments();
+    const aRows = [['Дата', 'Время', 'Пациент', 'Телефон', 'Услуга', 'Статус', 'Подтвердил', 'Создана']];
+    for (const a of appts) aRows.push([
+      a.slot_date, a.slot_time, a.name, a.phone, a.service,
+      a.status === 'cancelled' ? 'отменена' : 'активна',
+      a.confirmed ? 'да' : '', (a.created_at || '').slice(0, 16).replace('T', ' ')
+    ]);
+
+    const fs = require('fs');
+    fs.writeFileSync('/tmp/patients.csv', toCsv(pRows));
+    fs.writeFileSync('/tmp/appointments.csv', toCsv(aRows));
+
+    await ctx.replyWithDocument({ source: '/tmp/patients.csv', filename: `пациенты-${today}.csv` });
+    await ctx.replyWithDocument({ source: '/tmp/appointments.csv', filename: `записи-${today}.csv` },
+      { caption: 'Оба файла открываются в Excel двойным щелчком.' });
+  } catch (e) {
+    ctx.reply('Не удалось сделать экспорт: ' + e.message);
+  }
+});
+
 // ─── /backup (только для врача) — копия базы в Telegram ──
 async function sendBackup(chatId) {
   const dest = '/tmp/clinic-backup.db';
@@ -785,6 +823,7 @@ if (ADMIN_CHAT_ID) {
     { command: 'admincancel',  description: 'Отменить запись пациента' },
     { command: 'dayoff',       description: 'Закрыть день (выходной)' },
     { command: 'dayon',        description: 'Открыть закрытый день' },
+    { command: 'export',       description: 'Выгрузить данные в Excel' },
     { command: 'backup',       description: 'Скачать копию базы' },
     { command: 'slots',        description: 'Диагностика расписания' },
     { command: 'resetdb',      description: 'Сбросить слоты расписания' },
@@ -793,6 +832,9 @@ if (ADMIN_CHAT_ID) {
 }
 
 bot.launch();
+
+// Веб-панель (тот же сервис, та же база)
+require('./panel').startPanel();
 console.log(`Bot ishga tushdi / Бот запущен: ${CLINIC_NAME}`);
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
