@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS waiting_list (
   patient_id INTEGER UNIQUE,
   service TEXT,
   lang TEXT DEFAULT 'ru',
+  slot_date TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (patient_id) REFERENCES patients(id)
 );
@@ -61,6 +62,9 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 `);
+
+// Миграция: колонка даты в списке ожидания (ошибка "duplicate column" игнорируется)
+try { db.exec('ALTER TABLE waiting_list ADD COLUMN slot_date TEXT'); } catch (e) {}
 
 // Чистим возможные дубли слотов (оставляем занятый, если есть) и запрещаем дубли впредь
 db.exec(`
@@ -86,6 +90,17 @@ function savePhone(telegramId, phone) {
 
 function getAvailableSlots() {
   return db.prepare('SELECT * FROM slots WHERE is_booked = 0 ORDER BY slot_date, slot_time').all();
+}
+
+// Все предстоящие даты с флагом: есть ли свободные места
+function getDatesWithStatus() {
+  return db.prepare(`
+    SELECT slot_date, MAX(CASE WHEN is_booked = 0 THEN 1 ELSE 0 END) as has_free
+    FROM slots
+    WHERE slot_date >= ?
+    GROUP BY slot_date
+    ORDER BY slot_date
+  `).all(tashkentToday());
 }
 
 // Уникальные даты с хотя бы одним свободным слотом
@@ -265,23 +280,36 @@ function getPatientsForRebooking() {
 }
 
 // ─── Список ожидания ──────────────────────────────────────
-// Добавить пациента в очередь (повторное добавление обновляет услугу, место в очереди сохраняется)
-function addToWaitingList(patientId, service, lang) {
+// Добавить пациента в очередь. slotDate = конкретный день или null (любой день).
+// Повторное добавление обновляет день/услугу, место в очереди сохраняется.
+function addToWaitingList(patientId, service, lang, slotDate) {
   const existing = db.prepare('SELECT * FROM waiting_list WHERE patient_id = ?').get(patientId);
   if (existing) {
-    db.prepare('UPDATE waiting_list SET service = ?, lang = ? WHERE patient_id = ?').run(service || existing.service, lang || existing.lang, patientId);
+    db.prepare('UPDATE waiting_list SET service = ?, lang = ?, slot_date = ? WHERE patient_id = ?')
+      .run(service || existing.service, lang || existing.lang, slotDate !== undefined ? slotDate : existing.slot_date, patientId);
     return existing;
   }
-  db.prepare('INSERT INTO waiting_list (patient_id, service, lang) VALUES (?, ?, ?)').run(patientId, service || '', lang || 'ru');
+  db.prepare('INSERT INTO waiting_list (patient_id, service, lang, slot_date) VALUES (?, ?, ?, ?)')
+    .run(patientId, service || '', lang || 'ru', slotDate || null);
   return null;
 }
 
-// Первый в очереди (с данными пациента)
-function getFirstInWaitingList() {
+// Первый в очереди на освободившееся место: сначала ждущие именно этот день, потом общая очередь
+function getFirstInWaitingList(slotDate) {
+  if (slotDate) {
+    const dateSpecific = db.prepare(`
+      SELECT w.*, p.telegram_id, p.name FROM waiting_list w
+      JOIN patients p ON p.id = w.patient_id
+      WHERE p.telegram_id IS NOT NULL AND w.slot_date = ?
+      ORDER BY w.created_at, w.id
+      LIMIT 1
+    `).get(slotDate);
+    if (dateSpecific) return dateSpecific;
+  }
   return db.prepare(`
     SELECT w.*, p.telegram_id, p.name FROM waiting_list w
     JOIN patients p ON p.id = w.patient_id
-    WHERE p.telegram_id IS NOT NULL
+    WHERE p.telegram_id IS NOT NULL AND w.slot_date IS NULL
     ORDER BY w.created_at, w.id
     LIMIT 1
   `).get();
@@ -293,6 +321,15 @@ function removeFromWaitingList(patientId) {
 
 function getWaitingListCount() {
   return db.prepare('SELECT COUNT(*) as c FROM waiting_list').get().c;
+}
+
+// ─── Диагностика расписания (для команды /slots) ──────────
+function getSlotsDiagnostics() {
+  const total = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
+  const free = db.prepare('SELECT COUNT(*) as c FROM slots WHERE is_booked = 0').get().c;
+  const booked = db.prepare('SELECT COUNT(*) as c FROM slots WHERE is_booked = 1').get().c;
+  const freeDates = db.prepare('SELECT DISTINCT slot_date FROM slots WHERE is_booked = 0 ORDER BY slot_date').all().map(r => r.slot_date);
+  return { total, free, booked, freeDates };
 }
 
 // ─── Статистика за неделю (для отчёта врачу) ──────────────
@@ -329,13 +366,13 @@ function getWeeklyStats() {
 
 module.exports = {
   upsertPatient, savePhone,
-  getAvailableSlots, getAvailableDates, getSlotsByDate, getSlotById,
+  getAvailableSlots, getAvailableDates, getDatesWithStatus, getSlotsByDate, getSlotById,
   bookSlot, getNextAppointment, cancelAppointment,
   getAppointmentsInTwoHours, markReminded, formatDate,
   getVisitsForReview, markReviewSent, saveReview, getReviewByAppointment,
   getPatientsForRebooking,
   getUpcomingBookedAppointments, getAppointmentWithPatient,
   addToWaitingList, getFirstInWaitingList, removeFromWaitingList, getWaitingListCount,
-  getWeeklyStats,
+  getWeeklyStats, getSlotsDiagnostics,
   getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots, deleteOldSlots
 };

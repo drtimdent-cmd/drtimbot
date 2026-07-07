@@ -49,6 +49,8 @@ const TEXTS = {
     waitlistBtn:  '🔔 Встать в список ожидания',
     waitlistAdded:'✅ Вы в списке ожидания! Как только освободится место, мы сразу пришлём вам уведомление.',
     waitlistAlready:'Вы уже в списке ожидания. Как только появится место — сообщим!',
+    waitlistBtnDate:(date) => `🔔 В список ожидания на ${date}`,
+    waitlistAddedDate:(date) => `✅ Вы в списке ожидания на ${date}! Если на этот день освободится место — мы сразу пришлём вам уведомление.`,
     waitlistNotify:(date, time) => `🔔 Хорошая новость! Освободилось место в ${CLINIC_NAME}:\n\n📅 ${date}, ${time}\n\nЧтобы записаться, нажмите /start и выберите это время. Поторопитесь — место могут занять!`,
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
   },
@@ -79,6 +81,8 @@ const TEXTS = {
     waitlistBtn:  "🔔 Navbatga turish",
     waitlistAdded:"✅ Siz navbatdasiz! Joy bo'shashi bilan darhol xabar yuboramiz.",
     waitlistAlready:"Siz allaqachon navbatdasiz. Joy paydo bo'lishi bilan xabar beramiz!",
+    waitlistBtnDate:(date) => `🔔 ${date} kuniga navbatga turish`,
+    waitlistAddedDate:(date) => `✅ Siz ${date} kuni uchun navbatdasiz! Shu kunga joy bo'shasa — darhol xabar yuboramiz.`,
     waitlistNotify:(date, time) => `🔔 Yaxshi yangilik! ${CLINIC_NAME} klinikasida joy bo'shadi:\n\n📅 ${date}, ${time}\n\nYozilish uchun /start bosing va shu vaqtni tanlang. Shoshiling — joyni band qilishlari mumkin!`,
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
   },
@@ -120,15 +124,14 @@ bot.action(/service_(.+)/, async (ctx) => {
   const service = SERVICES.find(s => s.id === ctx.match[1]);
   userState[ctx.from.id] = { lang, service: service[lang], serviceIcon: service.icon, serviceId: service.id };
 
-  const dates = db.getAvailableDates();
-  if (!dates.length) {
+  const buttons = buildDateButtons();
+  if (!buttons.length) {
     await ctx.editMessageText(TEXTS[lang].noSlots,
       Markup.inlineKeyboard([[Markup.button.callback(TEXTS[lang].waitlistBtn, 'waitlist_join')]])
     );
     return;
   }
 
-  const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
@@ -141,20 +144,40 @@ ${TEXTS[lang].chooseDate}`,
   );
 });
 
+// Кнопки дат: свободные дни — обычные, полностью занятые — с 🔒
+function buildDateButtons() {
+  return db.getDatesWithStatus().map(d => Markup.button.callback(
+    d.has_free ? db.formatDate(d.slot_date) : `🔒 ${db.formatDate(d.slot_date)}`,
+    `date_${d.slot_date}`
+  ));
+}
+
 // ─── Список ожидания: пациент встаёт в очередь ────────────
 bot.action('waitlist_join', async (ctx) => {
   const state = userState[ctx.from.id];
   const lang = state?.lang || 'ru';
   const t = TEXTS[lang];
   const patient = db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
-  const existing = db.addToWaitingList(patient.id, state?.service || '', lang);
+  const existing = db.addToWaitingList(patient.id, state?.service || '', lang, null);
   await ctx.answerCbQuery();
   await ctx.editMessageText(existing ? t.waitlistAlready : t.waitlistAdded);
 });
 
+// Очередь на конкретный день
+bot.action(/wljoin_(.+)/, async (ctx) => {
+  const dateStr = ctx.match[1];
+  const state = userState[ctx.from.id];
+  const lang = state?.lang || 'ru';
+  const t = TEXTS[lang];
+  const patient = db.upsertPatient(ctx.from.id, `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim());
+  db.addToWaitingList(patient.id, state?.service || '', lang, dateStr);
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(t.waitlistAddedDate(db.formatDate(dateStr)));
+});
+
 // Уведомить первого в очереди об освободившемся месте
 async function notifyWaitingList(slotDate, slotTime) {
-  const first = db.getFirstInWaitingList();
+  const first = db.getFirstInWaitingList(slotDate);
   if (!first || !first.telegram_id) return;
   const lang = first.lang === 'uz' ? 'uz' : 'ru';
   try {
@@ -186,9 +209,13 @@ bot.action('ai_book', async (ctx) => {
   const state = userState[ctx.from.id];
   const lang = state?.lang || 'ru';
   userState[ctx.from.id] = { lang };
-  const dates = db.getAvailableDates();
-  if (!dates.length) { await ctx.editMessageText(TEXTS[lang].noSlots); return; }
-  const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
+  const buttons = buildDateButtons();
+  if (!buttons.length) {
+    await ctx.editMessageText(TEXTS[lang].noSlots,
+      Markup.inlineKeyboard([[Markup.button.callback(TEXTS[lang].waitlistBtn, 'waitlist_join')]])
+    );
+    return;
+  }
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
@@ -273,8 +300,7 @@ bot.action(/back_to_dates_(.+)/, async (ctx) => {
   const state = userState[ctx.from.id];
   const lang = state?.lang || 'ru';
   const service = SERVICES.find(s => s.id === serviceId);
-  const dates = db.getAvailableDates();
-  const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
+  const buttons = buildDateButtons();
   const rows = [];
   for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
   rows.push([Markup.button.callback('⬅️ Назад / Orqaga', 'back_to_services')]);
@@ -297,12 +323,10 @@ bot.action(/date_(.+)/, async (ctx) => {
   const formattedDate = db.formatDate(dateStr);
 
   if (!slots.length) {
-    // На этот день слотов нет — показываем другие даты
-    const dates = db.getAvailableDates();
-    const buttons = dates.map(d => Markup.button.callback(db.formatDate(d), `date_${d}`));
-    const rows = [];
-    for (let i = 0; i < buttons.length; i += 2) rows.push(buttons.slice(i, i + 2));
-    rows.push([Markup.button.callback(TEXTS[lang].waitlistBtn, 'waitlist_join')]);
+    // На этот день мест нет — предлагаем очередь на этот день + другие даты
+    const others = buildDateButtons().filter(b => b.callback_data !== `date_${dateStr}`);
+    const rows = [[Markup.button.callback(TEXTS[lang].waitlistBtnDate(formattedDate), `wljoin_${dateStr}`)]];
+    for (let i = 0; i < others.length; i += 2) rows.push(others.slice(i, i + 2));
     await ctx.editMessageText(TEXTS[lang].noSlotsDate(formattedDate), Markup.inlineKeyboard(rows));
     return;
   }
@@ -420,6 +444,20 @@ bot.action(/admcancel_(\d+)/, async (ctx) => {
     `✅ Запись отменена:\n${formattedDate}, ${appt.slot_time} — ${appt.name || 'Без имени'} (${appt.phone || '—'})\n${appt.service}\n\nСлот снова свободен, пациент получил уведомление.`
   );
   notifyWaitingList(appt.slot_date, appt.slot_time);
+});
+
+// ─── /slots (только для врача) — диагностика расписания ──
+bot.command('slots', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  const s = db.getSlotsDiagnostics();
+  const datesList = s.freeDates.length ? s.freeDates.map(d => db.formatDate(d)).join('\n') : '— нет —';
+  ctx.reply(
+    `🔍 Диагностика расписания:\n\n` +
+    `Всего слотов в базе: ${s.total}\n` +
+    `Свободных: ${s.free}\n` +
+    `Занятых: ${s.booked}\n\n` +
+    `Даты со свободными местами (${s.freeDates.length}):\n${datesList}`
+  );
 });
 
 // ─── /appointments (только для врача) ────────────────────
