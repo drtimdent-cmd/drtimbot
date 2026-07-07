@@ -45,6 +45,7 @@ const TEXTS = {
     aiBookBtn:    '✅ Записаться',
     aiSkipBtn:    'Не сейчас',
     cancelDone:   (date, time) => `❌ Запись на ${date} в ${time} отменена. Если хотите записаться снова — /start`,
+    cancelNone:   'У вас нет активных записей. Записаться — /start',
     slotTaken:    'К сожалению, это время уже заняли. Выберите другое.',
   },
   uz: {
@@ -70,6 +71,7 @@ const TEXTS = {
     aiBookBtn:    '✅ Yozilish',
     aiSkipBtn:    'Hozir emas',
     cancelDone:   (date, time) => `❌ ${date} kuni ${time} dagi yozuv bekor qilindi. Qayta yozilish uchun — /start`,
+    cancelNone:   "Sizda faol yozuvlar yo'q. Yozilish uchun — /start",
     slotTaken:    "Kechirasiz, bu vaqt band qilindi. Boshqa vaqtni tanlang.",
   },
 };
@@ -163,8 +165,24 @@ async function askClaude(symptoms, lang) {
   console.log('Запрос к Groq, длина симптомов:', symptoms.length);
 
   const systemPrompt = lang === 'ru'
-    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}". Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию на русском языке. Никогда не ставь диагноз. Всегда рекомендуй обратиться к врачу. Если симптомы серьёзные (сильная боль, отёк, температура) — рекомендуй срочный визит.`
-    : `Siz "${CLINIC_NAME}" stomatologiya klinikasining yordamchisisiz. Bemor belgilarini tasvirlab beradi, siz o'zbek tilida qisqa (3-5 gap) dastlabki tavsiya berasiz. Hech qachon tashxis qo'ymang. Har doim shifokorga murojaat qilishni tavsiya qiling.`;
+    ? `Ты помощник стоматологической клиники "${CLINIC_NAME}" в Узбекистане. Пациент описывает симптомы, ты даёшь краткую (3-5 предложений) предварительную рекомендацию.
+
+Строгие правила:
+- Отвечай ТОЛЬКО на грамотном русском языке. Не используй другие языки и выдуманные слова.
+- Пиши простым, понятным языком, без сложных медицинских терминов.
+- Никогда не ставь диагноз — только предположение, что это может быть, и что делать до визита.
+- Всегда в конце рекомендуй записаться на приём к врачу.
+- Если симптомы серьёзные (сильная боль, отёк, температура, кровотечение) — рекомендуй срочный визит.
+- Если сообщение пациента не про зубы и полость рта — вежливо скажи, что можешь помочь только со стоматологическими вопросами.`
+    : `Siz O'zbekistondagi "${CLINIC_NAME}" stomatologiya klinikasining yordamchisisiz. Bemor belgilarini tasvirlab beradi, siz qisqa (3-5 gap) dastlabki tavsiya berasiz.
+
+Qat'iy qoidalar:
+- FAQAT sof va toza o'zbek tilida (lotin yozuvida) javob bering. Boshqa tillarni va mavjud bo'lmagan so'zlarni ishlatmang.
+- Oddiy, tushunarli tilda yozing, murakkab tibbiy atamalarsiz.
+- Hech qachon tashxis qo'ymang — faqat bu nima bo'lishi mumkinligi va shifokorga borgunga qadar nima qilish kerakligi haqida ayting.
+- Har doim oxirida shifokor qabuliga yozilishni tavsiya qiling.
+- Belgilar jiddiy bo'lsa (kuchli og'riq, shish, harorat, qon ketishi) — shoshilinch tashrifni tavsiya qiling.
+- Agar bemorning xabari tish va og'iz bo'shlig'iga oid bo'lmasa — muloyimlik bilan faqat stomatologik savollarga yordam bera olishingizni ayting.`;
 
   try {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -174,13 +192,13 @@ async function askClaude(symptoms, lang) {
         'Authorization': `Bearer ${GROQ_KEY}`,
       },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
+        model: 'llama-3.3-70b-versatile',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: symptoms },
         ],
         max_tokens: 500,
-        temperature: 0.7,
+        temperature: 0.4,
       }),
     });
     const data = await res.json();
@@ -316,6 +334,45 @@ bot.command('resetdb', (ctx) => {
   ctx.reply('✅ База слотов сброшена! Новые даты загружены.');
 });
 
+// ─── /admincancel (только для врача) — отмена записи пациента ──
+bot.command('admincancel', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
+  const list = db.getUpcomingBookedAppointments();
+  if (!list.length) { ctx.reply('Предстоящих записей нет.'); return; }
+  const rows = list.slice(0, 20).map(a => [
+    Markup.button.callback(
+      `${db.formatDate(a.slot_date)} ${a.slot_time} — ${a.name || 'Без имени'}`,
+      `admcancel_${a.id}`
+    )
+  ]);
+  ctx.reply('Выберите запись, которую нужно отменить:', Markup.inlineKeyboard(rows));
+});
+
+bot.action(/admcancel_(\d+)/, async (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { await ctx.answerCbQuery('Только для администратора'); return; }
+  const appt = db.getAppointmentWithPatient(parseInt(ctx.match[1]));
+  if (!appt || appt.status !== 'booked') {
+    await ctx.answerCbQuery();
+    await ctx.editMessageText('Эта запись уже отменена или не найдена.');
+    return;
+  }
+
+  db.cancelAppointment(appt.id);
+  const formattedDate = db.formatDate(appt.slot_date);
+
+  // Уведомляем пациента (на двух языках, т.к. язык пациента не хранится)
+  if (appt.telegram_id) {
+    bot.telegram.sendMessage(appt.telegram_id,
+      `❌ Ваша запись в ${CLINIC_NAME} на ${formattedDate} в ${appt.slot_time} отменена клиникой.\nЗаписаться на другое время — /start\n\n❌ ${CLINIC_NAME} klinikasidagi ${formattedDate} kuni ${appt.slot_time} dagi yozuvingiz klinika tomonidan bekor qilindi.\nBoshqa vaqtga yozilish — /start`
+    ).catch(() => {});
+  }
+
+  await ctx.answerCbQuery('Отменено');
+  await ctx.editMessageText(
+    `✅ Запись отменена:\n${formattedDate}, ${appt.slot_time} — ${appt.name || 'Без имени'} (${appt.phone || '—'})\n${appt.service}\n\nСлот снова свободен, пациент получил уведомление.`
+  );
+});
+
 // ─── /appointments (только для врача) ────────────────────
 bot.command('appointments', (ctx) => {
   if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) { ctx.reply('Команда доступна только администратору.'); return; }
@@ -398,7 +455,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// ─── Каждый день в 10:00 — запрос отзыва после вчерашних визитов ──
+// ─── Каждый день в 10:00 (Ташкент) — запрос отзыва после вчерашних визитов ──
 cron.schedule('0 10 * * *', async () => {
   const visits = db.getVisitsForReview();
   for (const v of visits) {
@@ -417,9 +474,9 @@ cron.schedule('0 10 * * *', async () => {
       db.markReviewSent(v.id);
     } catch(e) { /* пациент заблокировал бота */ }
   }
-});
+}, { timezone: 'Asia/Tashkent' });
 
-// ─── Каждый день в 11:00 — напоминание о повторном визите через 6 месяцев ──
+// ─── Каждый день в 11:00 (Ташкент) — напоминание о повторном визите через 6 месяцев ──
 cron.schedule('0 11 * * *', async () => {
   const patients = db.getPatientsForRebooking();
   for (const p of patients) {
@@ -428,21 +485,20 @@ cron.schedule('0 11 * * *', async () => {
       await bot.telegram.sendMessage(p.telegram_id, TEXTS['ru'].rebooking(p.name || ''));
     } catch(e) { /* пациент заблокировал бота */ }
   }
-});
+}, { timezone: 'Asia/Tashkent' });
 
-// ─── Каждый день в полночь — удаляем прошедшие слоты ─────
+// ─── Каждый день в полночь (Ташкент) — удаляем прошедшие слоты ─────
 cron.schedule('0 0 * * *', () => {
-  const today = new Date().toISOString().slice(0, 10);
-  db.prepare('DELETE FROM slots WHERE slot_date < ? AND is_booked = 0').run(today);
+  db.deleteOldSlots();
   db.refillSlots();
   console.log('Старые слоты удалены, расписание обновлено');
-});
+}, { timezone: 'Asia/Tashkent' });
 
-// ─── Каждое воскресенье в полночь — пополняем расписание ──
+// ─── Каждое воскресенье в полночь (Ташкент) — пополняем расписание ──
 cron.schedule('0 0 * * 0', () => {
   db.refillSlots();
   console.log('Расписание пополнено на следующие 14 дней');
-});
+}, { timezone: 'Asia/Tashkent' });
 
 // ─── Напоминания — каждый час ─────────────────────────────
 cron.schedule('0 * * * *', async () => {

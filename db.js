@@ -1,6 +1,21 @@
 const Database = require('better-sqlite3');
 const db = new Database('clinic.db');
 
+// ─── Часовой пояс клиники: Ташкент, UTC+5 (без перехода на летнее время) ───
+// Сервер Railway живёт по UTC, поэтому все "сегодня/сейчас" считаем со сдвигом.
+const TASHKENT_OFFSET_MS = 5 * 60 * 60 * 1000;
+
+// Возвращает Date, у которого UTC-методы (getUTCHours, toISOString и т.д.)
+// показывают ташкентское время
+function tashkentNow() {
+  return new Date(Date.now() + TASHKENT_OFFSET_MS);
+}
+
+// Сегодняшняя дата в Ташкенте в формате YYYY-MM-DD
+function tashkentToday() {
+  return tashkentNow().toISOString().slice(0, 10);
+}
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS patients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,13 +108,12 @@ function cancelAppointment(appointmentId) {
   db.prepare('UPDATE slots SET is_booked = 0 WHERE slot_date = ? AND slot_time = ?').run(appt.slot_date, appt.slot_time);
 }
 
-// Находим записи ровно через 2 часа от текущего момента
+// Находим записи ровно через 2 часа от текущего момента (по ташкентскому времени)
 function getAppointmentsInTwoHours() {
-  const now = new Date();
-  // Целевое время = сейчас + 2 часа, округляем до часа
-  const target = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+  // Целевое время = сейчас в Ташкенте + 2 часа, округляем до часа
+  const target = new Date(Date.now() + TASHKENT_OFFSET_MS + 2 * 60 * 60 * 1000);
   const targetDate = target.toISOString().slice(0, 10); // YYYY-MM-DD
-  const targetHour = String(target.getHours()).padStart(2, '0') + ':00';
+  const targetHour = String(target.getUTCHours()).padStart(2, '0') + ':00';
 
   return db.prepare(`
     SELECT a.*, p.telegram_id, p.name, p.phone FROM appointments a
@@ -123,13 +137,33 @@ function getAllAppointments() {
   `).all();
 }
 
+// Предстоящие активные записи (от сегодня и позже) — для админ-отмены
+function getUpcomingBookedAppointments() {
+  const today = tashkentToday();
+  return db.prepare(`
+    SELECT a.*, p.name, p.phone, p.telegram_id FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.status = 'booked' AND a.slot_date >= ?
+    ORDER BY a.slot_date, a.slot_time
+  `).all(today);
+}
+
+// Одна запись вместе с данными пациента (для уведомления при отмене)
+function getAppointmentWithPatient(appointmentId) {
+  return db.prepare(`
+    SELECT a.*, p.name, p.phone, p.telegram_id FROM appointments a
+    JOIN patients p ON p.id = a.patient_id
+    WHERE a.id = ?
+  `).get(appointmentId);
+}
+
 // Форматируем дату для показа пациенту: 2026-07-03 → 03.07 (пятница)
 function formatDate(dateStr) {
   const days = ['воскресенье','понедельник','вторник','среда','четверг','пятница','суббота'];
-  const d = new Date(dateStr);
-  const day = String(d.getDate()).padStart(2, '0');
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const weekday = days[d.getDay()];
+  const d = new Date(dateStr); // YYYY-MM-DD парсится как полночь UTC
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const weekday = days[d.getUTCDay()];
   return `${day}.${month} (${weekday})`;
 }
 
@@ -137,14 +171,14 @@ function seedSlotsIfEmpty() {
   const count = db.prepare('SELECT COUNT(*) as c FROM slots').get().c;
   if (count > 0) return;
 
-  // Слоты на 14 дней вперёд, пн-сб, 9:00-17:00
+  // Слоты на 14 дней вперёд, пн-сб, 9:00-17:00 (от сегодняшней даты в Ташкенте)
   const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
   const insert = db.prepare('INSERT INTO slots (slot_date, slot_time) VALUES (?, ?)');
-  const today = new Date();
+  const today = tashkentNow();
   for (let i = 0; i < 14; i++) {
     const d = new Date(today);
-    d.setDate(today.getDate() + i);
-    if (d.getDay() === 0) continue; // воскресенье
+    d.setUTCDate(today.getUTCDate() + i);
+    if (d.getUTCDay() === 0) continue; // воскресенье
     const dateStr = d.toISOString().slice(0, 10); // YYYY-MM-DD — правильный формат
     for (const t of times) insert.run(dateStr, t);
   }
@@ -156,19 +190,24 @@ function refillSlots() {
     'SELECT slot_date FROM slots ORDER BY slot_date DESC LIMIT 1'
   ).get();
 
-  const startDate = last ? new Date(last.slot_date) : new Date();
-  startDate.setDate(startDate.getDate() + 1);
+  const startDate = last ? new Date(last.slot_date) : tashkentNow();
+  startDate.setUTCDate(startDate.getUTCDate() + 1);
 
   const times = ['09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00'];
   const insert = db.prepare('INSERT OR IGNORE INTO slots (slot_date, slot_time) VALUES (?, ?)');
 
   for (let i = 0; i < 14; i++) {
     const d = new Date(startDate);
-    d.setDate(startDate.getDate() + i);
-    if (d.getDay() === 0) continue;
+    d.setUTCDate(startDate.getUTCDate() + i);
+    if (d.getUTCDay() === 0) continue;
     const dateStr = d.toISOString().slice(0, 10);
     for (const t of times) insert.run(dateStr, t);
   }
+}
+
+// Удаляет прошедшие незабронированные слоты (по ташкентской дате)
+function deleteOldSlots() {
+  db.prepare('DELETE FROM slots WHERE slot_date < ? AND is_booked = 0').run(tashkentToday());
 }
 
 function resetSlots() {
@@ -178,7 +217,7 @@ function resetSlots() {
 
 // Визиты вчерашнего дня которым ещё не отправлен запрос отзыва
 function getVisitsForReview() {
-  const yesterday = new Date(Date.now() - 24*60*60*1000).toISOString().slice(0,10);
+  const yesterday = new Date(Date.now() + TASHKENT_OFFSET_MS - 24*60*60*1000).toISOString().slice(0,10);
   return db.prepare(`
     SELECT a.*, p.telegram_id, p.name FROM appointments a
     JOIN patients p ON p.id = a.patient_id
@@ -203,8 +242,8 @@ function getReviewByAppointment(appointmentId) {
 
 // Пациенты у которых последний визит был ровно 6 месяцев назад
 function getPatientsForRebooking() {
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const sixMonthsAgo = tashkentNow();
+  sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
   const target = sixMonthsAgo.toISOString().slice(0,10);
   return db.prepare(`
     SELECT p.*, MAX(a.slot_date) as last_visit FROM patients p
@@ -222,5 +261,6 @@ module.exports = {
   getAppointmentsInTwoHours, markReminded, formatDate,
   getVisitsForReview, markReviewSent, saveReview, getReviewByAppointment,
   getPatientsForRebooking,
-  getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots
+  getUpcomingBookedAppointments, getAppointmentWithPatient,
+  getAllAppointments, seedSlotsIfEmpty, resetSlots, refillSlots, deleteOldSlots
 };
